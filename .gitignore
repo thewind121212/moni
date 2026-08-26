@@ -1,0 +1,19 @@
+.DS_Store
+
+# Local Python environment and caches
+.esp-tools/
+__pycache__/
+*.py[cod]
+
+# PlatformIO build products
+firmware/.pio/
+
+# Reference repositories cloned during hardware research
+vendor/
+
+# Local ESP32 flash/partition dumps
+/*.bin
+
+# Runtime logs
+*.log
+*.err
