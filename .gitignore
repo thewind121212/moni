@@ -2,6 +2,7 @@
 
 # Local Python environment and caches
 .esp-tools/
+.venv-windows/
 __pycache__/
 *.py[cod]
 

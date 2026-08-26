@@ -1,0 +1,5 @@
+psutil>=7.0,<8
+pyserial==3.5
+nvidia-ml-py>=12.560,<14
+WMI==1.5.1
+pywin32>=308

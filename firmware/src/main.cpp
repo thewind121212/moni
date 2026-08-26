@@ -31,6 +31,7 @@ constexpr uint16_t kRed = 0xF9C7;
 constexpr uint16_t kViolet = 0xA35F;
 
 struct Metrics {
+  bool windowsHost = false;
   float cpu = 0;
   float pcpu = 0;
   float ecpu = 0;
@@ -55,6 +56,9 @@ struct Metrics {
   float load = 0;
   uint32_t uptime = 0;
   uint32_t epoch = 0;
+  uint8_t physicalCores = 0;
+  uint8_t logicalCores = 0;
+  float ramGb = 16;
 };
 
 TFT_eSPI tft;
@@ -145,9 +149,16 @@ void drawCpu(bool online) {
   header("01  CPU", color, online);
   bigValue(String(metrics.cpu, 0), "%", color);
   roundedCard(5, 102, 125, 62);
-  metricRow(108, "P CORES", String(metrics.pcpu, 0) + "%", kBlue);
-  progressBar(128, metrics.pcpu, 100, kBlue);
-  metricRow(140, "E CORES", String(metrics.ecpu, 0) + "%", kGreen);
+  if (metrics.windowsHost) {
+    metricRow(108, "CORES", String(metrics.physicalCores) + "C / " +
+                               String(metrics.logicalCores) + "T", kBlue);
+    progressBar(128, metrics.cpu, 100, kBlue);
+    metricRow(140, "CLOCK", String(metrics.pFreq) + " MHz", kGreen);
+  } else {
+    metricRow(108, "P CORES", String(metrics.pcpu, 0) + "%", kBlue);
+    progressBar(128, metrics.pcpu, 100, kBlue);
+    metricRow(140, "E CORES", String(metrics.ecpu, 0) + "%", kGreen);
+  }
   sparkline(0, 176, color);
   footer((String("CPU ") + String(metrics.cpuTemp, 0) + " C / " +
           String(metrics.pFreq) + " MHz").c_str());
@@ -158,11 +169,12 @@ void drawMemory(bool online) {
   header("02  MEMORY", color, online);
   bigValue(String(metrics.ram, 0), "%", color);
   roundedCard(5, 102, 125, 62);
-  metricRow(108, "USED", String(metrics.ram * 0.16f, 1) + " GB", color);
+  metricRow(108, "USED", String(metrics.ram * metrics.ramGb / 100.0f, 1) + " GB", color);
   progressBar(128, metrics.ram, 100, color);
   metricRow(140, "SWAP", String(metrics.swap, 0) + "%", kAmber);
   sparkline(1, 176, color);
-  footer("16 GB UNIFIED");
+  footer((String(metrics.ramGb, 0) +
+          (metrics.windowsHost ? " GB DDR5" : " GB UNIFIED")).c_str());
 }
 
 void drawThermal(bool online) {
@@ -219,7 +231,8 @@ void drawSystem(bool online) {
   metricRow(148, "FREE", String(metrics.freeGb, 1) + " GB", kGreen);
   metricRow(168, "UPTIME", uptimeText(metrics.uptime), kText);
   sparkline(4, 188, color);
-  footer(online ? "M2 PRO  /  MONI" : "WAITING FOR MAC");
+  footer(online ? (metrics.windowsHost ? "WINDOWS  /  MONI" : "M2 PRO  /  MONI")
+                : "WAITING FOR PC");
 }
 
 void renderPanel(uint8_t panel, bool online) {
@@ -294,6 +307,9 @@ void acceptJson(const char* line) {
   }
   if (doc["v"] != 1) return;
 
+  const char* hostOs = doc["os"] | "";
+  if (hostOs[0] != '\0') metrics.windowsHost = strcmp(hostOs, "win") == 0;
+
   metrics.cpu = doc["cpu"] | metrics.cpu;
   metrics.pcpu = doc["pc"] | metrics.pcpu;
   metrics.ecpu = doc["ec"] | metrics.ecpu;
@@ -318,6 +334,9 @@ void acceptJson(const char* line) {
   metrics.load = doc["load"] | metrics.load;
   metrics.uptime = doc["up"] | metrics.uptime;
   metrics.epoch = doc["t"] | metrics.epoch;
+  metrics.physicalCores = doc["cores"] | metrics.physicalCores;
+  metrics.logicalCores = doc["threads"] | metrics.logicalCores;
+  metrics.ramGb = doc["ramgb"] | metrics.ramGb;
   lastPacketAt = millis();
 }
 
