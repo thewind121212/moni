@@ -32,6 +32,7 @@ constexpr uint16_t kViolet = 0xA35F;
 
 struct Metrics {
   bool windowsHost = false;
+  uint8_t powerMode = 0;  // 0 unavailable, 1 CPU+GPU components, 2 measured total.
   float cpu = 0;
   float pcpu = 0;
   float ecpu = 0;
@@ -224,15 +225,28 @@ String uptimeText(uint32_t seconds) {
 void drawSystem(bool online) {
   const uint16_t color = statusColor(metrics.systemW, 30, 55, kAmber);
   header("05  POWER", color, online);
-  bigValue(String(metrics.systemW, 1), "W", color);
+  if (metrics.windowsHost && metrics.powerMode == 0) {
+    bigValue("N/A", "", kMuted);
+  } else {
+    bigValue(String(metrics.systemW, 1), "W", color);
+  }
   roundedCard(5, 102, 125, 82);
-  metricRow(108, "FAN", String(metrics.fan) + " rpm", kCyan);
+  metricRow(108, "CPU FAN", metrics.fan > 0 ? String(metrics.fan) + " rpm" : "N/A", kCyan);
   metricRow(128, "DISK", String(metrics.disk, 0) + "%", kViolet);
   metricRow(148, "FREE", String(metrics.freeGb, 1) + " GB", kGreen);
   metricRow(168, "UPTIME", uptimeText(metrics.uptime), kText);
   sparkline(4, 188, color);
-  footer(online ? (metrics.windowsHost ? "WINDOWS  /  MONI" : "M2 PRO  /  MONI")
-                : "WAITING FOR PC");
+  if (!online) {
+    footer("WAITING FOR PC");
+  } else if (!metrics.windowsHost) {
+    footer("M2 PRO  /  MONI");
+  } else if (metrics.powerMode == 2) {
+    footer("MEASURED TOTAL POWER");
+  } else if (metrics.powerMode == 1) {
+    footer("CPU + GPU / NOT WALL");
+  } else {
+    footer("POWER SENSOR MISSING");
+  }
 }
 
 void renderPanel(uint8_t panel, bool online) {
@@ -309,6 +323,11 @@ void acceptJson(const char* line) {
 
   const char* hostOs = doc["os"] | "";
   if (hostOs[0] != '\0') metrics.windowsHost = strcmp(hostOs, "win") == 0;
+  const char* powerMode = doc["pwrmode"] | "";
+  if (powerMode[0] != '\0') {
+    metrics.powerMode = strcmp(powerMode, "total") == 0 ? 2
+                        : strcmp(powerMode, "parts") == 0 ? 1 : 0;
+  }
 
   metrics.cpu = doc["cpu"] | metrics.cpu;
   metrics.pcpu = doc["pc"] | metrics.pcpu;

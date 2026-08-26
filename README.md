@@ -72,6 +72,29 @@ Then select the CPU-fan sensor using any unique part of its name or identifier:
 host\run-display-windows.cmd --fan-sensor "CPU Fan"
 ```
 
+If WMI returns no motherboard sensors, open LibreHardwareMonitor and enable
+`Options > Remote Web Server > Run`; Moni automatically falls back to its local
+`data.json` sensor feed. Run LibreHardwareMonitor as Administrator for Super I/O
+access on B650 motherboards.
+
+On Windows the power panel prefers a hardware-reported total-system/PSU sensor.
+Most desktop PSUs do not expose one, so the fallback is explicitly labeled
+`CPU + GPU / NOT WALL`. If either package-power sensor is unavailable, Moni
+shows `N/A` instead of presenting the remaining component as total PC power.
+
+## Update the clock from Windows
+
+The repository includes a prebuilt SI HAI firmware image. Close any visible
+Moni sender window, plug in the clock, and run:
+
+```bat
+host\update-firmware-windows.cmd
+```
+
+The updater finds the CH340 COM port, pauses only the Moni sender, flashes the
+image, and restarts telemetry automatically. PlatformIO is not required on the
+Windows PC.
+
 The same ESP32 firmware is host-aware: Windows shows physical cores/threads,
 DDR5 capacity, and CPU clock, while macOS retains the Apple P/E-core and unified
 memory presentation.

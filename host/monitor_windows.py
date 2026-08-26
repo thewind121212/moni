@@ -7,8 +7,11 @@ import argparse
 import json
 import os
 import platform
+import re
 import sys
 import time
+from urllib import error as urlerror
+from urllib import request as urlrequest
 from dataclasses import dataclass
 from typing import Any
 
@@ -132,10 +135,11 @@ class NvidiaGpu:
 class LibreSensors:
     """Read CPU package temperature, power, and CPU-fan RPM from LHM WMI."""
 
-    def __init__(self, fan_selector: str = "") -> None:
+    def __init__(self, fan_selector: str = "", rest_url: str = "http://127.0.0.1:8085") -> None:
         self.client: Any | None = None
         self.error: str | None = None
         self.fan_selector = fan_selector.casefold()
+        self.rest_url = rest_url.rstrip("/")
         if wmi is None:
             self.error = "WMI package is not installed"
             return
@@ -146,23 +150,67 @@ class LibreSensors:
             self.client = None
             self.error = str(error)
 
-    def rows(self) -> list[dict[str, Any]]:
-        if self.client is None:
-            return []
+    def _wmi_rows(self) -> list[dict[str, Any]]:
+        if self.client is not None:
+            try:
+                rows = [
+                    {
+                        "name": str(sensor.Name or ""),
+                        "type": str(sensor.SensorType or ""),
+                        "id": str(sensor.Identifier or ""),
+                        "parent": str(getattr(sensor, "Parent", "") or ""),
+                        "value": float(sensor.Value or 0),
+                    }
+                    for sensor in self.client.Sensor()
+                ]
+                if rows:
+                    return rows
+            except Exception as error:
+                self.error = str(error)
+        return []
+
+    @staticmethod
+    def _number(value: Any) -> float:
+        match = re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", str(value or ""))
+        return float(match.group(0)) if match else 0.0
+
+    def _rest_rows(self) -> list[dict[str, Any]]:
         try:
-            return [
-                {
-                    "name": str(sensor.Name or ""),
-                    "type": str(sensor.SensorType or ""),
-                    "id": str(sensor.Identifier or ""),
-                    "parent": str(sensor.Parent or ""),
-                    "value": float(sensor.Value or 0),
-                }
-                for sensor in self.client.Sensor()
-            ]
-        except Exception as error:
-            self.error = str(error)
+            with urlrequest.urlopen(f"{self.rest_url}/data.json", timeout=0.35) as response:
+                root = json.loads(response.read().decode("utf-8"))
+        except (OSError, ValueError, urlerror.URLError):
             return []
+
+        rows: list[dict[str, Any]] = []
+
+        def visit(node: dict[str, Any], hardware: str = "") -> None:
+            current_hardware = hardware
+            if "SensorId" not in node and node.get("Text") not in (None, "Sensor"):
+                current_hardware = str(node.get("Text", hardware))
+            if "SensorId" in node:
+                sensor_id = str(node.get("SensorId", ""))
+                rows.append({
+                    "name": str(node.get("Text", "")),
+                    "type": str(node.get("Type", "")),
+                    "id": sensor_id,
+                    "parent": current_hardware,
+                    "value": self._number(node.get("RawValue", node.get("Value", 0))),
+                })
+            for child in node.get("Children", []):
+                if isinstance(child, dict):
+                    visit(child, current_hardware)
+
+        visit(root)
+        return rows
+
+    def rows(self) -> list[dict[str, Any]]:
+        rows = self._wmi_rows()
+        if rows:
+            return rows
+        rows = self._rest_rows()
+        if rows:
+            self.error = None
+        return rows
 
     @staticmethod
     def _is_cpu(row: dict[str, Any]) -> bool:
@@ -180,6 +228,7 @@ class LibreSensors:
         temperatures = [row for row in rows if row["type"].casefold() == "temperature"]
         powers = [row for row in rows if row["type"].casefold() == "power"]
         fans = [row for row in rows if row["type"].casefold() == "fan" and row["value"] > 0]
+        clocks = [row for row in rows if row["type"].casefold() == "clock" and row["value"] > 0]
 
         def temperature_score(row: dict[str, Any]) -> int:
             if not self._is_cpu(row):
@@ -211,30 +260,49 @@ class LibreSensors:
                 return 150
             if "cpu" in text:
                 return 120
-            if "fan #1" in text or "fan 1" in text:
+            if "fan #1" in text or "fan 1" in text or "/fan/0" in text:
                 return 50
             return 1
+
+        core_clocks = [
+            row["value"] for row in clocks
+            if self._is_cpu(row)
+            and "bus" not in row["name"].casefold()
+            and ("core" in row["name"].casefold() or "/clock/" in row["id"].casefold())
+            and row["value"] > 200
+        ]
+
+        def total_power_score(row: dict[str, Any]) -> int:
+            text = (row["name"] + " " + row["id"]).casefold()
+            if "total system power" in text:
+                return 200
+            if "psu" in text and ("input" in text or "total" in text):
+                return 150
+            return -1
 
         return {
             "ct": rounded(self._best(temperatures, temperature_score)),
             "cpuw": rounded(self._best(powers, power_score), 2),
             "fan": int(self._best(fans, fan_score)),
+            "pf": int(round(sum(core_clocks) / len(core_clocks))) if core_clocks else 0,
+            "wallw": rounded(self._best(powers, total_power_score), 2),
         }
 
     def print_sensors(self) -> None:
         rows = self.rows()
         if not rows:
             print(f"LibreHardwareMonitor sensors unavailable: {self.error or 'no sensors'}")
+            print("In LibreHardwareMonitor enable Options > Remote Web Server > Run for REST fallback.")
             return
         for row in rows:
-            if row["type"].casefold() in {"temperature", "power", "fan"}:
+            if row["type"].casefold() in {"temperature", "power", "fan", "clock"}:
                 print(f"{row['type']:12} {row['value']:8.1f}  {row['name']:<28} {row['id']}")
 
 
 class WindowsSampler:
-    def __init__(self, fan_selector: str = "") -> None:
+    def __init__(self, fan_selector: str = "", rest_url: str = "http://127.0.0.1:8085") -> None:
         self.gpu = NvidiaGpu()
-        self.sensors = LibreSensors(fan_selector)
+        self.sensors = LibreSensors(fan_selector, rest_url)
         self.previous = rate_state()
         psutil.cpu_percent(interval=None)
 
@@ -250,6 +318,11 @@ class WindowsSampler:
         hardware = self.sensors.sample()
         cpu_w = float(hardware["cpuw"])
         gpu_w = float(gpu["gpuw"])
+        measured_total_w = float(hardware["wallw"])
+        component_w = cpu_w + gpu_w if cpu_w > 0 and gpu_w > 0 else 0
+        system_w = measured_total_w if measured_total_w > 0 else component_w
+        power_mode = "total" if measured_total_w > 0 else "parts" if component_w > 0 else "none"
+        live_clock = int(hardware["pf"])
 
         return {
             "v": PROTOCOL_VERSION,
@@ -264,11 +337,12 @@ class WindowsSampler:
             "ram": clamp_percent(memory.percent),
             "swap": clamp_percent(swap.percent),
             "ct": hardware["ct"],
-            "pf": int(cpu_frequency.current if cpu_frequency else 0),
+            "pf": live_clock or int(cpu_frequency.current if cpu_frequency else 0),
             "ef": 0,
             "fan": hardware["fan"],
             "cpuw": rounded(cpu_w, 2),
-            "sysw": rounded(cpu_w + gpu_w, 2),
+            "sysw": rounded(system_w, 2),
+            "pwrmode": power_mode,
             "disk": rounded(disk.percent),
             "free": rounded(disk.free / (1024**3)),
             "load": rounded(cpu * (psutil.cpu_count() or 1) / 100.0, 2),
@@ -333,9 +407,10 @@ def main() -> int:
     parser.add_argument("--samples", type=int, default=0, help="stop after N samples (0 = forever)")
     parser.add_argument("--list-sensors", action="store_true", help="list LHM temperature, power, and fan sensors")
     parser.add_argument("--fan-sensor", default="", help="substring selecting the CPU-fan sensor name or ID")
+    parser.add_argument("--lhm-url", default="http://127.0.0.1:8085", help="LibreHardwareMonitor REST URL fallback")
     args = parser.parse_args()
 
-    sampler = WindowsSampler(args.fan_sensor)
+    sampler = WindowsSampler(args.fan_sensor, args.lhm_url)
     if args.list_sensors:
         print(f"NVIDIA: {sampler.gpu.name}" + (f" ({sampler.gpu.error})" if sampler.gpu.error else ""))
         sampler.sensors.print_sensors()
