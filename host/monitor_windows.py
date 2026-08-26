@@ -140,17 +140,33 @@ class LibreSensors:
         self.error: str | None = None
         self.fan_selector = fan_selector.casefold()
         self.rest_url = rest_url.rstrip("/")
+        self.last_connect_attempt = 0.0
         if wmi is None:
             self.error = "WMI package is not installed"
             return
+        self._connect_wmi(force=True)
+
+    def _connect_wmi(self, force: bool = False) -> None:
+        if wmi is None or self.client is not None:
+            return
+        now = time.monotonic()
+        if not force and now - self.last_connect_attempt < 3.0:
+            return
+        self.last_connect_attempt = now
         try:
             self.client = wmi.WMI(namespace=r"root\LibreHardwareMonitor")
-            list(self.client.Sensor())
+            rows = list(self.client.Sensor())
+            if not rows:
+                self.client = None
+                self.error = "LibreHardwareMonitor WMI namespace has no sensors"
+            else:
+                self.error = None
         except Exception as error:
             self.client = None
             self.error = str(error)
 
     def _wmi_rows(self) -> list[dict[str, Any]]:
+        self._connect_wmi()
         if self.client is not None:
             try:
                 rows = [
@@ -166,6 +182,7 @@ class LibreSensors:
                 if rows:
                     return rows
             except Exception as error:
+                self.client = None
                 self.error = str(error)
         return []
 

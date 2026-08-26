@@ -75,7 +75,9 @@ host\run-display-windows.cmd --fan-sensor "CPU Fan"
 If WMI returns no motherboard sensors, open LibreHardwareMonitor and enable
 `Options > Remote Web Server > Run`; Moni automatically falls back to its local
 `data.json` sensor feed. Run LibreHardwareMonitor as Administrator for Super I/O
-access on B650 motherboards.
+access on B650 motherboards. Also enable LibreHardwareMonitor's `Run On Windows
+Startup` and `Start Minimized` options. Moni retries WMI every three seconds, so
+the two programs may start in either order.
 
 On Windows the power panel prefers a hardware-reported total-system/PSU sensor.
 Most desktop PSUs do not expose one, so the fallback is explicitly labeled
