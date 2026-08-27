@@ -25,7 +25,8 @@ The Mac sender currently collects:
 ```
 
 The `firmware/` directory contains the SI HAI IPS five-panel firmware. Its
-physical slots 1–5 are CPU, memory, GPU, I/O, and system power; slot 6 is empty.
+physical slots 1–6 are CPU, memory, GPU, I/O, system power, and thermals
+(CPU / GPU / motherboard / VRM temperatures).
 
 The original firmware is not erased until the new image has compiled and the
 connected board has passed a final identity check.
@@ -33,9 +34,9 @@ connected board has passed a final identity check.
 ## Windows gaming PC
 
 The Windows sender is designed for an AMD Ryzen CPU and NVIDIA RTX GPU. It
-collects CPU load/clock/temperature/power, CPU-fan RPM, NVIDIA GPU
-load/clock/temperature/power, actual installed RAM, disk usage/free space,
-network and disk throughput, and uptime.
+collects CPU load/clock/temperature/power, motherboard and VRM temperatures,
+CPU-fan RPM, NVIDIA GPU load/clock/temperature/power, actual installed RAM,
+disk usage/free space, network and disk throughput, and uptime.
 
 Open PowerShell in the project directory and run:
 

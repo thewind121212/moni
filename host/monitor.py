@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -173,6 +174,8 @@ def open_serial(port: str, baud: int) -> serial.Serial:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", help="serial port; auto-detected by default")
+    parser.add_argument("--udp", default="",
+                        help="stream over WiFi instead of USB: device IP or IP:port (default port 5005)")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--interval", type=int, default=1000, help="sample interval in milliseconds")
     parser.add_argument("--preview", action="store_true", help="print JSON instead of opening serial")
@@ -184,6 +187,14 @@ def main() -> int:
     psutil.cpu_percent(interval=None)
     sent = 0
 
+    udp_target: tuple[str, int] | None = None
+    udp_socket: socket.socket | None = None
+    if args.udp:
+        host_part, _, port_part = args.udp.partition(":")
+        udp_target = (host_part, int(port_part) if port_part else 5005)
+        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        print(f"Streaming UDP telemetry to {udp_target[0]}:{udp_target[1]}", file=sys.stderr)
+
     try:
         for raw in macmon_samples(args.interval):
             payload, previous = compact_sample(raw, previous)
@@ -191,6 +202,15 @@ def main() -> int:
 
             if args.preview:
                 print(line, flush=True)
+            elif udp_socket is not None and udp_target is not None:
+                try:
+                    # Re-announce periodically so a rebooted display gets metadata.
+                    if sent % 60 == 0:
+                        hello = json.dumps(metadata(), separators=(",", ":"))
+                        udp_socket.sendto((hello + "\n").encode(), udp_target)
+                    udp_socket.sendto((line + "\n").encode(), udp_target)
+                except OSError as error:
+                    print(f"UDP send failed: {error}", file=sys.stderr)
             else:
                 if connection is None or not connection.is_open:
                     port = resolve_port(args.port)
@@ -223,6 +243,8 @@ def main() -> int:
     finally:
         if connection is not None:
             connection.close()
+        if udp_socket is not None:
+            udp_socket.close()
     return 0
 
 

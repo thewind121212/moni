@@ -290,6 +290,22 @@ class LibreSensors:
             and row["value"] > 200
         ]
 
+        def mobo_temp_score(row: dict[str, Any]) -> int:
+            text = (row["name"] + " " + row["id"] + " " + row["parent"]).casefold()
+            if "cpu" in text or "gpu" in text or "vrm" in text or "nvme" in text or "storage" in text:
+                return -1
+            if "motherboard" in text or "system" in row["name"].casefold():
+                return 100
+            if "/lpc/" in row["id"].casefold():
+                return 50
+            return -1
+
+        def vrm_temp_score(row: dict[str, Any]) -> int:
+            text = (row["name"] + " " + row["id"] + " " + row["parent"]).casefold()
+            if "gpu" in text:
+                return -1
+            return 100 if "vrm" in text or "vr mos" in text else -1
+
         def total_power_score(row: dict[str, Any]) -> int:
             text = (row["name"] + " " + row["id"]).casefold()
             if "total system power" in text:
@@ -300,6 +316,8 @@ class LibreSensors:
 
         return {
             "ct": rounded(self._best(temperatures, temperature_score)),
+            "mt": rounded(self._best(temperatures, mobo_temp_score)),
+            "vt": rounded(self._best(temperatures, vrm_temp_score)),
             "cpuw": rounded(self._best(powers, power_score), 2),
             "fan": int(self._best(fans, fan_score)),
             "pf": int(round(sum(core_clocks) / len(core_clocks))) if core_clocks else 0,
@@ -355,6 +373,8 @@ class WindowsSampler:
             "ram": clamp_percent(memory.percent),
             "swap": clamp_percent(swap.percent),
             "ct": hardware["ct"],
+            "mt": hardware["mt"],
+            "vt": hardware["vt"],
             "pf": live_clock or int(cpu_frequency.current if cpu_frequency else 0),
             "ef": 0,
             "fan": hardware["fan"],

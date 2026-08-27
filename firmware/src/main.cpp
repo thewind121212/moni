@@ -22,8 +22,8 @@ constexpr uint32_t kOfflineAfterMs = 3500;
 
 // The mode button toggles the telemetry source: USB serial (wire) or WiFi
 // UDP from the gaming PC. Fill in your 2.4 GHz network before building.
-constexpr char kWifiSsid[] = "YOUR_WIFI_SSID";
-constexpr char kWifiPassword[] = "YOUR_WIFI_PASSWORD";
+constexpr char kWifiSsid[] = "HomeLabLinh";
+constexpr char kWifiPassword[] = "0918327132";
 constexpr uint16_t kUdpPort = 5005;
 
 constexpr uint16_t kBg = 0x0862;
@@ -49,6 +49,8 @@ struct Metrics {
   float swap = 0;
   float cpuTemp = 0;
   float gpuTemp = 0;
+  float moboTemp = 0;
+  float vrmTemp = 0;
   int pFreq = 0;
   int eFreq = 0;
   int gFreq = 0;
@@ -102,9 +104,7 @@ NeoPixelBus<NeoGrbFeature, Neo800KbpsMethod> pixels(kPanelCount, kRgbPin);
 Metrics metrics;
 
 float histories[kPanelCount][kHistorySize] = {};
-float historyMax[kPanelCount] = {100, 100, 100, 1, 50, 1};
-float cpuTempHistory[kHistorySize] = {};
-float gpuTempHistory[kHistorySize] = {};
+float historyMax[kPanelCount] = {100, 100, 100, 1, 50, 100};
 RollingPeak netPeak;
 RollingPeak powerPeak;
 char serialLine[768];
@@ -117,6 +117,9 @@ bool screensOn = true;
 bool wifiMode = false;  // false = USB serial, true = WiFi UDP from the PC.
 WiFiUDP udp;
 char udpLine[768];
+uint32_t ipShownAt = 0;  // Nonzero while the IP screen is up; auto-hides after 3 s.
+IPAddress senderIp;      // Locked WiFi sender; released after kOfflineAfterMs of silence.
+bool senderIsWin = false;
 
 uint16_t statusColor(float value, float warm, float hot, uint16_t normal = kCyan) {
   if (value >= hot) return kRed;
@@ -136,14 +139,24 @@ void header(const char* label, uint16_t accent, bool online) {
   canvas.setTextFont(2);
   canvas.setTextColor(kMuted, kBg);
   canvas.drawString(label, 8, 10);
-  // Link tag: USB (muted) or WIFI (amber while joining, green once connected).
-  canvas.setTextDatum(TR_DATUM);
-  canvas.setTextFont(1);
-  canvas.setTextColor(!wifiMode                        ? kMuted
-                      : WiFi.status() == WL_CONNECTED ? kGreen
-                                                       : kAmber, kBg);
-  canvas.drawString(wifiMode ? "WIFI" : "USB", 114, 14);
-  canvas.fillCircle(121, 18, 3, online ? kGreen : kRed);
+  // Link icon: WiFi fan (amber while joining, green connected) or USB plug.
+  const uint16_t link = !wifiMode                       ? kMuted
+                        : WiFi.status() == WL_CONNECTED ? kGreen
+                                                        : kAmber;
+  if (wifiMode) {
+    canvas.fillCircle(118, 21, 2, link);
+    canvas.drawArc(118, 21, 6, 5, 135, 225, link, kBg);
+    canvas.drawArc(118, 21, 10, 9, 135, 225, link, kBg);
+  } else {
+    // USB trident: stem with arrowhead, one square and one round branch.
+    canvas.drawFastVLine(118, 12, 10, link);
+    canvas.fillTriangle(115, 13, 121, 13, 118, 8, link);
+    canvas.drawLine(118, 19, 113, 15, link);
+    canvas.fillRect(111, 12, 3, 3, link);
+    canvas.drawLine(118, 17, 123, 13, link);
+    canvas.fillCircle(123, 12, 1, link);
+    canvas.fillCircle(118, 23, 2, link);
+  }
 }
 
 void bigValue(const String& value, const char* unit, uint16_t color) {
@@ -198,7 +211,7 @@ void footer(const char* text) {
 
 void drawCpu(bool online) {
   const uint16_t color = statusColor(metrics.cpu, 65, 88, kCyan);
-  header("01  CPU", color, online);
+  header("CPU", color, online);
   bigValue(String(metrics.cpu, 0), "%", color);
   roundedCard(5, 102, 125, 62);
   if (metrics.windowsHost) {
@@ -211,16 +224,13 @@ void drawCpu(bool online) {
     progressBar(128, metrics.pcpu, 100, kBlue);
     metricRow(140, "E CORES", String(metrics.ecpu, 0) + "%", kGreen);
   }
-  // Load in the panel color, temperature overlaid in amber (fixed 0-100 C).
   sparkline(0, 176, color);
-  sparklineLine(cpuTempHistory, 176, kAmber, 100);
-  footer((String("LOAD ") + String(metrics.cpu, 0) + "%  /  TEMP " +
-          String(metrics.cpuTemp, 0) + " C").c_str());
+  footer((String(metrics.cpuW, 1) + " W PACKAGE").c_str());
 }
 
 void drawMemory(bool online) {
   const uint16_t color = statusColor(metrics.ram, 75, 90, kViolet);
-  header("02  MEMORY", color, online);
+  header("MEMORY", color, online);
   bigValue(String(metrics.ram, 0), "%", color);
   roundedCard(5, 102, 125, 62);
   metricRow(108, "USED", String(metrics.ram * metrics.ramGb / 100.0f, 1) + " GB", color);
@@ -233,31 +243,26 @@ void drawMemory(bool online) {
 
 void drawGpu(bool online) {
   const uint16_t color = statusColor(metrics.gpu, 70, 90, kBlue);
-  header("03  GPU", color, online);
+  header("GPU", color, online);
   bigValue(String(metrics.gpu, 0), "%", color);
   roundedCard(5, 102, 125, 62);
-  metricRow(108, "GPU TEMP", String(metrics.gpuTemp, 1) + " C", kGreen);
+  metricRow(108, "POWER", String(metrics.gpuW, 0) + " W", kGreen);
   progressBar(128, metrics.gpu, 100, color);
   metricRow(140, "CLOCK", String(metrics.gFreq) + " MHz", kText);
-  // Load in the panel color, temperature overlaid in amber (fixed 0-100 C).
   sparkline(2, 176, color);
-  sparklineLine(gpuTempHistory, 176, kAmber, 100);
-  footer((String("LOAD ") + String(metrics.gpu, 0) + "%  /  TEMP " +
-          String(metrics.gpuTemp, 0) + " C").c_str());
 }
 
 void drawIo(bool online) {
   const float peak = max(max(metrics.netRx, metrics.netTx), 0.1f);
   const uint16_t color = kCyan;
-  header("04  I/O", color, online);
+  header("I/O", color, online);
   bigValue(String(peak, peak < 10 ? 1 : 0), "MB/s", color);
   roundedCard(5, 102, 125, 62);
   metricRow(108, "DOWNLOAD", String(metrics.netRx, 2), kGreen);
   metricRow(128, "UPLOAD", String(metrics.netTx, 2), kBlue);
   metricRow(148, "DISK R/W", String(metrics.diskRead, 1) + "/" + String(metrics.diskWrite, 1), kText);
   sparkline(3, 176, color);
-  footer((String("SCALE ") + String(historyMax[3], historyMax[3] < 10 ? 1 : 0) +
-          " MB/s (10 MIN PEAK)").c_str());
+  footer((String("PEAK ") + String(historyMax[3], historyMax[3] < 10 ? 1 : 0) + " MB/s").c_str());
 }
 
 String uptimeText(uint32_t seconds) {
@@ -277,7 +282,7 @@ uint16_t powerColor() {
 
 void drawSystem(bool online) {
   const uint16_t color = powerColor();
-  header("05  POWER", color, online);
+  header("POWER", color, online);
   if (metrics.windowsHost && metrics.powerMode == 0) {
     bigValue("N/A", "", kMuted);
   } else {
@@ -309,6 +314,25 @@ void drawSystem(bool online) {
   }
 }
 
+void tempRow(int y, const char* label, float value, float warm, float hot) {
+  metricRow(y, label, value > 0 ? String(value, 0) + " C" : String("N/A"),
+            value > 0 ? statusColor(value, warm, hot, kGreen) : kMuted);
+}
+
+void drawThermal(bool online) {
+  const float hottest = max(metrics.cpuTemp, metrics.gpuTemp);
+  const uint16_t color = statusColor(hottest, 70, 85, kGreen);
+  header("THERMAL", color, online);
+  bigValue(String(hottest, 0), "C", color);
+  roundedCard(5, 102, 125, 82);
+  tempRow(108, "CPU", metrics.cpuTemp, 70, 85);
+  tempRow(128, "GPU", metrics.gpuTemp, 70, 85);
+  tempRow(148, "BIOS", metrics.moboTemp, 55, 70);
+  tempRow(168, "VRM", metrics.vrmTemp, 80, 95);
+  sparkline(5, 188, color);
+  footer(hottest >= 85 ? "HOT" : hottest >= 70 ? "WARM" : "THERMALS NORMAL");
+}
+
 void renderPanel(uint8_t panel, bool online) {
   switch (panel) {
     case 0: drawCpu(online); break;
@@ -316,7 +340,8 @@ void renderPanel(uint8_t panel, bool online) {
     case 2: drawGpu(online); break;
     case 3: drawIo(online); break;
     case 4: drawSystem(online); break;
-    default: return;  // Physical slot 6 is intentionally empty.
+    case 5: drawThermal(online); break;
+    default: return;
   }
   chipSelect.setPhysical(panel);
   canvas.pushSprite(0, 0);
@@ -335,7 +360,7 @@ void updateRgb(bool online) {
       RgbColor(35, 100, 245),
       RgbColor(0, 220, 130),
       RgbColor(245, 85, 12),
-      RgbColor(0),
+      rgbFor(max(metrics.cpuTemp, metrics.gpuTemp), 70, 85, RgbColor(190, 190, 190)),
   };
   const float dim = brightness / 255.0f;
   for (uint8_t physical = 0; physical < kPanelCount; ++physical) {
@@ -351,7 +376,7 @@ void updateRgb(bool online) {
 
 void renderAll() {
   const bool online = lastPacketAt && millis() - lastPacketAt < kOfflineAfterMs;
-  for (uint8_t panel = 0; panel < 5; ++panel) renderPanel(panel, online);
+  for (uint8_t panel = 0; panel < kPanelCount; ++panel) renderPanel(panel, online);
   updateRgb(online);
 }
 
@@ -363,17 +388,12 @@ void pushHistory() {
       metrics.gpu,
       max(metrics.netRx, metrics.netTx),
       metrics.systemW,
-      0,
+      max(metrics.cpuTemp, metrics.gpuTemp),
   };
   for (uint8_t panel = 0; panel < kPanelCount; ++panel) {
     memmove(&histories[panel][0], &histories[panel][1], sizeof(float) * (kHistorySize - 1));
     histories[panel][kHistorySize - 1] = values[panel];
   }
-  memmove(&cpuTempHistory[0], &cpuTempHistory[1], sizeof(float) * (kHistorySize - 1));
-  cpuTempHistory[kHistorySize - 1] = metrics.cpuTemp;
-  memmove(&gpuTempHistory[0], &gpuTempHistory[1], sizeof(float) * (kHistorySize - 1));
-  gpuTempHistory[kHistorySize - 1] = metrics.gpuTemp;
-
   // Scale I/O and power charts to the last 10 minutes' peak, so 1 MB/s draws
   // at 10% height when the 10-minute maximum was 10 MB/s.
   netPeak.add(values[3], now);
@@ -407,6 +427,8 @@ void acceptJson(const char* line) {
   metrics.swap = doc["swap"] | metrics.swap;
   metrics.cpuTemp = doc["ct"] | metrics.cpuTemp;
   metrics.gpuTemp = doc["gt"] | metrics.gpuTemp;
+  metrics.moboTemp = doc["mt"] | metrics.moboTemp;
+  metrics.vrmTemp = doc["vt"] | metrics.vrmTemp;
   metrics.pFreq = doc["pf"] | metrics.pFreq;
   metrics.eFreq = doc["ef"] | metrics.eFreq;
   metrics.gFreq = doc["gf"] | metrics.gFreq;
@@ -456,13 +478,32 @@ void stopWifi() {
   WiFi.mode(WIFI_OFF);
 }
 
+bool packetFromWindows(const char* line) {
+  StaticJsonDocument<32> filter;
+  filter["os"] = true;
+  StaticJsonDocument<96> peek;
+  if (deserializeJson(peek, line, DeserializationOption::Filter(filter))) return false;
+  return strcmp(peek["os"] | "", "win") == 0;
+}
+
 void readUdp() {
   // The host sends one JSON object per datagram, same lines as over serial.
   for (int size = udp.parsePacket(); size > 0; size = udp.parsePacket()) {
+    const IPAddress from = udp.remoteIP();
     const int length = udp.read(udpLine, sizeof(udpLine) - 1);
     if (length <= 0) continue;
     udpLine[length] = '\0';
     if (udpLine[length - 1] == '\n') udpLine[length - 1] = '\0';
+    // One sender at a time: the display locks to whoever feeds it. While the
+    // lock holds, only a Windows sender may take over from a non-Windows one
+    // (the gaming PC outranks the Mac fallback); anyone else is ignored.
+    // kOfflineAfterMs of silence releases the lock.
+    if (from != senderIp) {
+      const bool locked = lastPacketAt && millis() - lastPacketAt < kOfflineAfterMs;
+      if (locked && !(packetFromWindows(udpLine) && !senderIsWin)) continue;
+      senderIp = from;
+      senderIsWin = packetFromWindows(udpLine);
+    }
     acceptJson(udpLine);
   }
 }
@@ -496,22 +537,38 @@ bool buttonPressed(uint8_t pin) {
   return false;
 }
 
-// Full-screen confirmation shown for a moment when the link mode changes.
-void modeToast() {
-  for (uint8_t panel = 0; panel < 5; ++panel) {
+// Full-screen notice on every panel (link mode changes, IP display).
+void toast(const char* title, const char* subtitle, uint16_t color) {
+  for (uint8_t panel = 0; panel < kPanelCount; ++panel) {
     canvas.fillSprite(kBg);
-    canvas.fillRect(0, 0, kWidth, 5, wifiMode ? kGreen : kCyan);
+    canvas.fillRect(0, 0, kWidth, 5, color);
     canvas.setTextDatum(MC_DATUM);
     canvas.setTextFont(4);
-    canvas.setTextColor(wifiMode ? kGreen : kCyan, kBg);
-    canvas.drawString(wifiMode ? "WIFI" : "USB", 67, 100);
+    canvas.setTextColor(color, kBg);
+    canvas.drawString(title, 67, 100);
     canvas.setTextFont(2);
     canvas.setTextColor(kMuted, kBg);
-    canvas.drawString(wifiMode ? "CONNECTING..." : "SERIAL LINK", 67, 140);
+    canvas.drawString(subtitle, 67, 140);
     chipSelect.setPhysical(panel);
     canvas.pushSprite(0, 0);
   }
-  delay(700);
+}
+
+String ipText() {
+  return WiFi.localIP().toString() + ":" + String(kUdpPort);
+}
+
+// Hold the connecting screen until the network joins. Give up after 15 s, or
+// immediately when the mode button is pressed again; the caller falls back to
+// the wire in both cases.
+bool waitForWifi() {
+  const uint32_t deadline = millis() + 15000;
+  while (millis() < deadline) {
+    if (WiFi.status() == WL_CONNECTED) return true;
+    if (buttonPressed(kModeButtonPin)) return false;
+    delay(50);
+  }
+  return false;
 }
 
 void handleButtons() {
@@ -529,24 +586,63 @@ void handleButtons() {
       pixels.Show();
     }
   }
-  if (buttonPressed(kLeftButtonPin) && brightness > 40) brightness -= 30;
-  if (buttonPressed(kRightButtonPin) && brightness < 225) brightness += 30;
+  const bool leftPressed = buttonPressed(kLeftButtonPin);
+  const bool rightPressed = buttonPressed(kRightButtonPin);
+  if (wifiMode && WiFi.status() == WL_CONNECTED && screensOn &&
+      (leftPressed || rightPressed)) {
+    // Up/down shows the device IP; press again (or wait 3 s) to go back.
+    if (ipShownAt) {
+      ipShownAt = 0;
+      renderAll();
+    } else {
+      toast("WIFI", ipText().c_str(), kGreen);
+      ipShownAt = millis();
+    }
+  } else {
+    if (leftPressed && brightness > 40) brightness -= 30;
+    if (rightPressed && brightness < 225) brightness += 30;
+  }
+
   if (buttonPressed(kModeButtonPin)) {
     wifiMode = !wifiMode;
-    if (wifiMode) startWifi();
-    else stopWifi();
     lastPacketAt = 0;  // Show offline until the new source delivers a packet.
-    if (screensOn) {
-      modeToast();
-      renderAll();
+    ipShownAt = 0;
+    if (wifiMode) {
+      startWifi();
+      if (screensOn) toast("WIFI", "CONNECTING...", kAmber);
+      if (waitForWifi()) {
+        if (screensOn) {
+          toast("WIFI", ipText().c_str(), kGreen);
+          delay(1500);
+        }
+      } else {
+        stopWifi();
+        wifiMode = false;
+        if (screensOn) {
+          toast("USB", "FALLBACK TO WIRE", kRed);
+          delay(1500);
+        }
+      }
+    } else {
+      stopWifi();
+      if (screensOn) {
+        toast("USB", "SERIAL LINK", kCyan);
+        delay(700);
+      }
     }
+    if (screensOn) renderAll();
   }
 }
 
 void splash() {
-  const char* labels[5] = {"M", "O", "N", "I", "M2"};
-  const uint16_t colors[5] = {kCyan, kViolet, kBlue, kGreen, kAmber};
-  for (uint8_t panel = 0; panel < 5; ++panel) {
+  // Boot LED self-test: all backlights full white. The WS2812 data line
+  // daisy-chains through every display module, so a dark LED here (and all
+  // LEDs after it) means that module is not seated properly.
+  pixels.ClearTo(RgbColor(255, 255, 255));
+  pixels.Show();
+  const char* labels[kPanelCount] = {"M", "O", "N", "I", "M", "2"};
+  const uint16_t colors[kPanelCount] = {kCyan, kViolet, kBlue, kGreen, kAmber, kRed};
+  for (uint8_t panel = 0; panel < kPanelCount; ++panel) {
     canvas.fillSprite(kBg);
     canvas.fillRect(0, 0, kWidth, 5, colors[panel]);
     canvas.setTextDatum(MC_DATUM);
@@ -563,6 +659,11 @@ void splash() {
 }  // namespace
 
 void setup() {
+  // Let the 5 V rail settle before touching the panels. On a PC the USB
+  // enumeration delays boot enough to mask this; on a wall adapter the ESP32
+  // boots instantly and the displays stay blank without the wait. The vendor
+  // firmware waits 500 ms here too.
+  delay(500);
   Serial.begin(115200);
   Serial.setRxBufferSize(2048);
 
@@ -605,7 +706,11 @@ void loop() {
     lastHistoryAt = now;
     pushHistory();
   }
-  if (screensOn && now - lastDrawAt >= 1000) {
+  if (ipShownAt && now - ipShownAt >= 3000) {
+    ipShownAt = 0;
+    if (screensOn) renderAll();
+  }
+  if (screensOn && !ipShownAt && now - lastDrawAt >= 1000) {
     lastDrawAt = now;
     renderAll();
   }
