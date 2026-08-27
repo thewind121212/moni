@@ -2,6 +2,8 @@
 #include <ArduinoJson.h>
 #include <NeoPixelBus.h>
 #include <TFT_eSPI.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
 
 #include "ChipSelect.h"
 
@@ -17,6 +19,12 @@ constexpr uint8_t kRightButtonPin = 39;
 constexpr uint8_t kPowerButtonPin = 36;
 constexpr uint8_t kHistorySize = 45;
 constexpr uint32_t kOfflineAfterMs = 3500;
+
+// The mode button toggles the telemetry source: USB serial (wire) or WiFi
+// UDP from the gaming PC. Fill in your 2.4 GHz network before building.
+constexpr char kWifiSsid[] = "YOUR_WIFI_SSID";
+constexpr char kWifiPassword[] = "YOUR_WIFI_PASSWORD";
+constexpr uint16_t kUdpPort = 5005;
 
 constexpr uint16_t kBg = 0x0862;
 constexpr uint16_t kSurface = 0x10E4;
@@ -62,6 +70,31 @@ struct Metrics {
   float ramGb = 16;
 };
 
+// Tracks the peak of a signal over the last ~10 minutes (20 buckets x 30 s).
+// Charts are scaled against this peak so the y-axis stays stable instead of
+// collapsing every time the instantaneous value drops.
+struct RollingPeak {
+  static constexpr uint8_t kBuckets = 20;
+  float buckets[kBuckets] = {};
+  uint8_t index = 0;
+  uint32_t lastRotateAt = 0;
+
+  void add(float value, uint32_t now) {
+    if (now - lastRotateAt >= 30000) {
+      lastRotateAt = now;
+      index = (index + 1) % kBuckets;
+      buckets[index] = 0;
+    }
+    if (value > buckets[index]) buckets[index] = value;
+  }
+
+  float peak() const {
+    float m = 0;
+    for (uint8_t i = 0; i < kBuckets; ++i) m = max(m, buckets[i]);
+    return m;
+  }
+};
+
 TFT_eSPI tft;
 TFT_eSprite canvas(&tft);
 ChipSelect chipSelect;
@@ -69,7 +102,11 @@ NeoPixelBus<NeoGrbFeature, Neo800KbpsMethod> pixels(kPanelCount, kRgbPin);
 Metrics metrics;
 
 float histories[kPanelCount][kHistorySize] = {};
-float historyMax[kPanelCount] = {100, 100, 100, 5, 25, 1};
+float historyMax[kPanelCount] = {100, 100, 100, 1, 50, 1};
+float cpuTempHistory[kHistorySize] = {};
+float gpuTempHistory[kHistorySize] = {};
+RollingPeak netPeak;
+RollingPeak powerPeak;
 char serialLine[768];
 size_t serialLength = 0;
 uint32_t lastPacketAt = 0;
@@ -77,6 +114,9 @@ uint32_t lastDrawAt = 0;
 uint32_t lastHistoryAt = 0;
 uint8_t brightness = 220;
 bool screensOn = true;
+bool wifiMode = false;  // false = USB serial, true = WiFi UDP from the PC.
+WiFiUDP udp;
+char udpLine[768];
 
 uint16_t statusColor(float value, float warm, float hot, uint16_t normal = kCyan) {
   if (value >= hot) return kRed;
@@ -96,6 +136,13 @@ void header(const char* label, uint16_t accent, bool online) {
   canvas.setTextFont(2);
   canvas.setTextColor(kMuted, kBg);
   canvas.drawString(label, 8, 10);
+  // Link tag: USB (muted) or WIFI (amber while joining, green once connected).
+  canvas.setTextDatum(TR_DATUM);
+  canvas.setTextFont(1);
+  canvas.setTextColor(!wifiMode                        ? kMuted
+                      : WiFi.status() == WL_CONNECTED ? kGreen
+                                                       : kAmber, kBg);
+  canvas.drawString(wifiMode ? "WIFI" : "USB", 114, 14);
   canvas.fillCircle(121, 18, 3, online ? kGreen : kRed);
 }
 
@@ -126,16 +173,20 @@ void progressBar(int y, float value, float maxValue, uint16_t color) {
   if (width > 0) canvas.fillRoundRect(10, y, width, 7, 3, color);
 }
 
-void sparkline(uint8_t panel, int y, uint16_t color) {
-  const float scale = max(historyMax[panel], 0.01f);
-  canvas.drawFastHLine(8, y + 42, 119, kSurface2);
+void sparklineLine(const float* data, int y, uint16_t color, float scale) {
+  const float s = max(scale, 0.01f);
   for (uint8_t i = 1; i < kHistorySize; ++i) {
     const int x0 = 8 + (i - 1) * 119 / (kHistorySize - 1);
     const int x1 = 8 + i * 119 / (kHistorySize - 1);
-    const int y0 = y + 42 - constrain(static_cast<int>(histories[panel][i - 1] * 40 / scale), 0, 40);
-    const int y1 = y + 42 - constrain(static_cast<int>(histories[panel][i] * 40 / scale), 0, 40);
+    const int y0 = y + 42 - constrain(static_cast<int>(data[i - 1] * 40 / s), 0, 40);
+    const int y1 = y + 42 - constrain(static_cast<int>(data[i] * 40 / s), 0, 40);
     canvas.drawLine(x0, y0, x1, y1, color);
   }
+}
+
+void sparkline(uint8_t panel, int y, uint16_t color) {
+  canvas.drawFastHLine(8, y + 42, 119, kSurface2);
+  sparklineLine(histories[panel], y, color, historyMax[panel]);
 }
 
 void footer(const char* text) {
@@ -160,9 +211,11 @@ void drawCpu(bool online) {
     progressBar(128, metrics.pcpu, 100, kBlue);
     metricRow(140, "E CORES", String(metrics.ecpu, 0) + "%", kGreen);
   }
+  // Load in the panel color, temperature overlaid in amber (fixed 0-100 C).
   sparkline(0, 176, color);
-  footer((String("CPU ") + String(metrics.cpuTemp, 0) + " C / " +
-          String(metrics.pFreq) + " MHz").c_str());
+  sparklineLine(cpuTempHistory, 176, kAmber, 100);
+  footer((String("LOAD ") + String(metrics.cpu, 0) + "%  /  TEMP " +
+          String(metrics.cpuTemp, 0) + " C").c_str());
 }
 
 void drawMemory(bool online) {
@@ -178,19 +231,6 @@ void drawMemory(bool online) {
           (metrics.windowsHost ? " GB DDR5" : " GB UNIFIED")).c_str());
 }
 
-void drawThermal(bool online) {
-  const float hottest = max(metrics.cpuTemp, metrics.gpuTemp);
-  const uint16_t color = statusColor(hottest, 70, 85, kGreen);
-  header("03  THERMAL", color, online);
-  bigValue(String(metrics.cpuTemp, 0), "C", color);
-  roundedCard(5, 102, 125, 62);
-  metricRow(108, "CPU AVG", String(metrics.cpuTemp, 1) + " C", color);
-  progressBar(128, metrics.cpuTemp, 100, color);
-  metricRow(140, "GPU AVG", String(metrics.gpuTemp, 1) + " C", kBlue);
-  sparkline(2, 176, color);
-  footer(hottest >= 85 ? "HOT" : hottest >= 70 ? "WARM" : "THERMALS NORMAL");
-}
-
 void drawGpu(bool online) {
   const uint16_t color = statusColor(metrics.gpu, 70, 90, kBlue);
   header("03  GPU", color, online);
@@ -199,8 +239,11 @@ void drawGpu(bool online) {
   metricRow(108, "GPU TEMP", String(metrics.gpuTemp, 1) + " C", kGreen);
   progressBar(128, metrics.gpu, 100, color);
   metricRow(140, "CLOCK", String(metrics.gFreq) + " MHz", kText);
+  // Load in the panel color, temperature overlaid in amber (fixed 0-100 C).
   sparkline(2, 176, color);
-  footer((String(metrics.gpuW, 2) + " W GPU").c_str());
+  sparklineLine(gpuTempHistory, 176, kAmber, 100);
+  footer((String("LOAD ") + String(metrics.gpu, 0) + "%  /  TEMP " +
+          String(metrics.gpuTemp, 0) + " C").c_str());
 }
 
 void drawIo(bool online) {
@@ -213,7 +256,8 @@ void drawIo(bool online) {
   metricRow(128, "UPLOAD", String(metrics.netTx, 2), kBlue);
   metricRow(148, "DISK R/W", String(metrics.diskRead, 1) + "/" + String(metrics.diskWrite, 1), kText);
   sparkline(3, 176, color);
-  footer("LIVE THROUGHPUT");
+  footer((String("SCALE ") + String(historyMax[3], historyMax[3] < 10 ? 1 : 0) +
+          " MB/s (10 MIN PEAK)").c_str());
 }
 
 String uptimeText(uint32_t seconds) {
@@ -222,8 +266,17 @@ String uptimeText(uint32_t seconds) {
   return String(days) + "d " + String(hours) + "h";
 }
 
+// Warm/hot power thresholds depend on what the host reports. A Windows tower
+// on an 850 W PSU idles near 100 W, so the Mac-scale numbers must not apply.
+uint16_t powerColor() {
+  if (!metrics.windowsHost) return statusColor(metrics.systemW, 30, 55, kAmber);
+  if (metrics.powerMode == 2) return statusColor(metrics.systemW, 450, 650, kAmber);
+  if (metrics.powerMode == 1) return statusColor(metrics.systemW, 250, 330, kAmber);
+  return kMuted;  // No power sensor: never alarm on a stale value.
+}
+
 void drawSystem(bool online) {
-  const uint16_t color = statusColor(metrics.systemW, 30, 55, kAmber);
+  const uint16_t color = powerColor();
   header("05  POWER", color, online);
   if (metrics.windowsHost && metrics.powerMode == 0) {
     bigValue("N/A", "", kMuted);
@@ -237,7 +290,14 @@ void drawSystem(bool online) {
   metricRow(168, "UPTIME", uptimeText(metrics.uptime), kText);
   sparkline(4, 188, color);
   if (!online) {
-    footer("WAITING FOR PC");
+    if (!wifiMode) {
+      footer("WAITING FOR PC (USB)");
+    } else if (WiFi.status() == WL_CONNECTED) {
+      // Point the PC at this address: monitor --udp <ip>.
+      footer((String("WIFI ") + WiFi.localIP().toString() + ":" + String(kUdpPort)).c_str());
+    } else {
+      footer("WIFI CONNECTING...");
+    }
   } else if (!metrics.windowsHost) {
     footer("M2 PRO  /  MONI");
   } else if (metrics.powerMode == 2) {
@@ -296,6 +356,7 @@ void renderAll() {
 }
 
 void pushHistory() {
+  const uint32_t now = millis();
   const float values[kPanelCount] = {
       metrics.cpu,
       metrics.ram,
@@ -307,9 +368,18 @@ void pushHistory() {
   for (uint8_t panel = 0; panel < kPanelCount; ++panel) {
     memmove(&histories[panel][0], &histories[panel][1], sizeof(float) * (kHistorySize - 1));
     histories[panel][kHistorySize - 1] = values[panel];
-    if (panel == 3) historyMax[panel] = max(1.0f, values[panel] * 1.2f);
-    if (panel == 4) historyMax[panel] = max(15.0f, values[panel] * 1.2f);
   }
+  memmove(&cpuTempHistory[0], &cpuTempHistory[1], sizeof(float) * (kHistorySize - 1));
+  cpuTempHistory[kHistorySize - 1] = metrics.cpuTemp;
+  memmove(&gpuTempHistory[0], &gpuTempHistory[1], sizeof(float) * (kHistorySize - 1));
+  gpuTempHistory[kHistorySize - 1] = metrics.gpuTemp;
+
+  // Scale I/O and power charts to the last 10 minutes' peak, so 1 MB/s draws
+  // at 10% height when the 10-minute maximum was 10 MB/s.
+  netPeak.add(values[3], now);
+  powerPeak.add(values[4], now);
+  historyMax[3] = max(1.0f, netPeak.peak());
+  historyMax[4] = max(50.0f, powerPeak.peak());
 }
 
 void acceptJson(const char* line) {
@@ -373,6 +443,30 @@ void readSerial() {
   }
 }
 
+void startWifi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);  // Keep 1 Hz UDP telemetry from stalling on modem sleep.
+  WiFi.begin(kWifiSsid, kWifiPassword);
+  udp.begin(kUdpPort);
+}
+
+void stopWifi() {
+  udp.stop();
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+}
+
+void readUdp() {
+  // The host sends one JSON object per datagram, same lines as over serial.
+  for (int size = udp.parsePacket(); size > 0; size = udp.parsePacket()) {
+    const int length = udp.read(udpLine, sizeof(udpLine) - 1);
+    if (length <= 0) continue;
+    udpLine[length] = '\0';
+    if (udpLine[length - 1] == '\n') udpLine[length - 1] = '\0';
+    acceptJson(udpLine);
+  }
+}
+
 bool buttonPressed(uint8_t pin) {
   static bool initialized[40] = {};
   static bool lastRaw[40] = {};
@@ -402,6 +496,24 @@ bool buttonPressed(uint8_t pin) {
   return false;
 }
 
+// Full-screen confirmation shown for a moment when the link mode changes.
+void modeToast() {
+  for (uint8_t panel = 0; panel < 5; ++panel) {
+    canvas.fillSprite(kBg);
+    canvas.fillRect(0, 0, kWidth, 5, wifiMode ? kGreen : kCyan);
+    canvas.setTextDatum(MC_DATUM);
+    canvas.setTextFont(4);
+    canvas.setTextColor(wifiMode ? kGreen : kCyan, kBg);
+    canvas.drawString(wifiMode ? "WIFI" : "USB", 67, 100);
+    canvas.setTextFont(2);
+    canvas.setTextColor(kMuted, kBg);
+    canvas.drawString(wifiMode ? "CONNECTING..." : "SERIAL LINK", 67, 140);
+    chipSelect.setPhysical(panel);
+    canvas.pushSprite(0, 0);
+  }
+  delay(700);
+}
+
 void handleButtons() {
   if (buttonPressed(kPowerButtonPin)) {
     screensOn = !screensOn;
@@ -409,10 +521,26 @@ void handleButtons() {
     tft.writecommand(screensOn ? 0x29 : 0x28);
     // SI HAI display power is active-high.
     digitalWrite(kBacklightPin, screensOn ? HIGH : LOW);
+    if (screensOn) {
+      renderAll();
+    } else {
+      // Screens off means fully dark: the RGB chain behind the panels too.
+      pixels.ClearTo(RgbColor(0));
+      pixels.Show();
+    }
   }
   if (buttonPressed(kLeftButtonPin) && brightness > 40) brightness -= 30;
   if (buttonPressed(kRightButtonPin) && brightness < 225) brightness += 30;
-  if (buttonPressed(kModeButtonPin)) renderAll();
+  if (buttonPressed(kModeButtonPin)) {
+    wifiMode = !wifiMode;
+    if (wifiMode) startWifi();
+    else stopWifi();
+    lastPacketAt = 0;  // Show offline until the new source delivers a packet.
+    if (screensOn) {
+      modeToast();
+      renderAll();
+    }
+  }
 }
 
 void splash() {
@@ -468,7 +596,8 @@ void setup() {
 }
 
 void loop() {
-  readSerial();
+  if (wifiMode) readUdp();
+  else readSerial();
   handleButtons();
 
   const uint32_t now = millis();
