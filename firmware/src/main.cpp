@@ -50,7 +50,9 @@ struct Metrics {
   float cpuTemp = 0;
   float gpuTemp = 0;
   float moboTemp = 0;
-  float vrmTemp = 0;
+  float ssdTemp = 0;
+  float vramUsed = 0;
+  float vramGb = 0;
   int pFreq = 0;
   int eFreq = 0;
   int gFreq = 0;
@@ -245,11 +247,16 @@ void drawGpu(bool online) {
   const uint16_t color = statusColor(metrics.gpu, 70, 90, kBlue);
   header("GPU", color, online);
   bigValue(String(metrics.gpu, 0), "%", color);
-  roundedCard(5, 102, 125, 62);
+  roundedCard(5, 102, 125, 82);
   metricRow(108, "POWER", String(metrics.gpuW, 0) + " W", kGreen);
   progressBar(128, metrics.gpu, 100, color);
-  metricRow(140, "CLOCK", String(metrics.gFreq) + " MHz", kText);
-  sparkline(2, 176, color);
+  metricRow(140, "VRAM",
+            metrics.vramGb > 0
+                ? String(metrics.vramUsed, 1) + "/" + String(metrics.vramGb, 0) + " GB"
+                : String("N/A"),
+            metrics.vramGb > 0 ? kViolet : kMuted);
+  metricRow(160, "CLOCK", String(metrics.gFreq) + " MHz", kText);
+  sparkline(2, 188, color);
 }
 
 void drawIo(bool online) {
@@ -327,8 +334,8 @@ void drawThermal(bool online) {
   roundedCard(5, 102, 125, 82);
   tempRow(108, "CPU", metrics.cpuTemp, 70, 85);
   tempRow(128, "GPU", metrics.gpuTemp, 70, 85);
-  tempRow(148, "BIOS", metrics.moboTemp, 55, 70);
-  tempRow(168, "VRM", metrics.vrmTemp, 80, 95);
+  tempRow(148, "MOBO", metrics.moboTemp, 55, 70);
+  tempRow(168, "SSD", metrics.ssdTemp, 60, 70);
   sparkline(5, 188, color);
   footer(hottest >= 85 ? "HOT" : hottest >= 70 ? "WARM" : "THERMALS NORMAL");
 }
@@ -428,7 +435,9 @@ void acceptJson(const char* line) {
   metrics.cpuTemp = doc["ct"] | metrics.cpuTemp;
   metrics.gpuTemp = doc["gt"] | metrics.gpuTemp;
   metrics.moboTemp = doc["mt"] | metrics.moboTemp;
-  metrics.vrmTemp = doc["vt"] | metrics.vrmTemp;
+  metrics.ssdTemp = doc["st"] | metrics.ssdTemp;
+  metrics.vramUsed = doc["vram"] | metrics.vramUsed;
+  metrics.vramGb = doc["vramgb"] | metrics.vramGb;
   metrics.pFreq = doc["pf"] | metrics.pFreq;
   metrics.eFreq = doc["ef"] | metrics.eFreq;
   metrics.gFreq = doc["gf"] | metrics.gFreq;

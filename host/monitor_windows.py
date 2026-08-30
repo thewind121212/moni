@@ -110,7 +110,7 @@ class NvidiaGpu:
 
     def sample(self) -> dict[str, float]:
         if self.handle is None or pynvml is None:
-            return {"gpu": 0, "gt": 0, "gf": 0, "gpuw": 0}
+            return {"gpu": 0, "gt": 0, "gf": 0, "gpuw": 0, "vram": 0, "vramgb": 0}
         try:
             utilization = pynvml.nvmlDeviceGetUtilizationRates(self.handle).gpu
         except Exception:
@@ -123,6 +123,10 @@ class NvidiaGpu:
                 self.handle, pynvml.NVML_CLOCK_GRAPHICS))),
             "gpuw": rounded(self._read(
                 lambda: pynvml.nvmlDeviceGetPowerUsage(self.handle)) / 1000.0, 2),
+            "vram": rounded(self._read(
+                lambda: pynvml.nvmlDeviceGetMemoryInfo(self.handle).used) / (1024**3), 1),
+            "vramgb": rounded(self._read(
+                lambda: pynvml.nvmlDeviceGetMemoryInfo(self.handle).total) / (1024**3), 1),
         }
 
     def close(self) -> None:
@@ -300,11 +304,17 @@ class LibreSensors:
                 return 50
             return -1
 
-        def vrm_temp_score(row: dict[str, Any]) -> int:
+        # ponytail: replaced VRM temp — most boards expose no VRM sensor via
+        # LHM, while every NVMe drive reports SMART temperature. Hottest wins.
+        def ssd_temp_score(row: dict[str, Any]) -> int:
             text = (row["name"] + " " + row["id"] + " " + row["parent"]).casefold()
-            if "gpu" in text:
+            if "gpu" in text or "cpu" in text:
                 return -1
-            return 100 if "vrm" in text or "vr mos" in text else -1
+            if "/nvme/" in text or "nvme" in text:
+                return 100
+            if "/hdd/" in text or "storage" in text or "ssd" in text:
+                return 80
+            return -1
 
         def total_power_score(row: dict[str, Any]) -> int:
             text = (row["name"] + " " + row["id"]).casefold()
@@ -317,7 +327,7 @@ class LibreSensors:
         return {
             "ct": rounded(self._best(temperatures, temperature_score)),
             "mt": rounded(self._best(temperatures, mobo_temp_score)),
-            "vt": rounded(self._best(temperatures, vrm_temp_score)),
+            "st": rounded(self._best(temperatures, ssd_temp_score)),
             "cpuw": rounded(self._best(powers, power_score), 2),
             "fan": int(self._best(fans, fan_score)),
             "pf": int(round(sum(core_clocks) / len(core_clocks))) if core_clocks else 0,
@@ -374,7 +384,7 @@ class WindowsSampler:
             "swap": clamp_percent(swap.percent),
             "ct": hardware["ct"],
             "mt": hardware["mt"],
-            "vt": hardware["vt"],
+            "st": hardware["st"],
             "pf": live_clock or int(cpu_frequency.current if cpu_frequency else 0),
             "ef": 0,
             "fan": hardware["fan"],
