@@ -2,13 +2,14 @@
 //! publish status for the app.
 
 use crate::config::{Config, Transport};
+use crate::control;
 use crate::hardware::{self, Choices, SensorFeed};
 use crate::paths;
 use crate::sampler::{Payload, Sampler};
 use crate::transport::{list_ports, PortInfo, SerialLink, UdpLink};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -30,6 +31,8 @@ pub struct Status {
     pub sensors_note: String,
     pub gpu_name: String,
     pub gpu_note: String,
+    pub control_on: bool,
+    pub control_note: String,
     pub ports: Vec<PortInfo>,
     pub sample: Option<Payload>,
 }
@@ -59,7 +62,12 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
     let mut ports_at: Option<Instant> = None;
     let mut sensors_at: Option<Instant> = None;
     let mut sent = 0u64;
+    let control_key = Arc::new(Mutex::new(config.control_key.clone()));
+    let control_note = (!options.preview).then(|| control::start(control_key.clone()));
     paths::log(&format!("moni-service {VERSION} started ({:?})", config.transport));
+    if let Some(note) = &control_note {
+        paths::log(&format!("remote shutdown: {}", note.lock().unwrap()));
+    }
 
     while !stop.load(Ordering::SeqCst) {
         let started = Instant::now();
@@ -69,10 +77,11 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
             config_stamp = stamp;
             let fresh = Config::load(&config_path);
             if fresh != config {
-                paths::log(&format!("settings changed: {fresh:?}"));
+                paths::log(&format!("settings changed: {:?}", fresh.redacted()));
                 if fresh.serial_port != config.serial_port || fresh.baud != config.baud || !fresh.transport.uses_usb() {
                     serial.close("settings changed");
                 }
+                *control_key.lock().unwrap() = fresh.control_key.clone();
                 config = fresh;
             }
         }
@@ -83,7 +92,10 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
             ssd: &config.ssd_sensor,
         });
         let line = serde_json::to_string(&payload).unwrap_or_default();
-        let hello = serde_json::to_string(&sampler.hello()).unwrap_or_default();
+        let control_on = control_note.is_some() && control::key_ok(&config.control_key);
+        let mut hello = sampler.hello();
+        hello.ctl = if control_on { control::CONTROL_PORT } else { 0 };
+        let hello = serde_json::to_string(&hello).unwrap_or_default();
         let paused = paths::usb_paused();
 
         if options.preview {
@@ -121,6 +133,8 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
                 sensors_note: sensor_error.unwrap_or_default(),
                 gpu_name: sampler.gpu.name.clone(),
                 gpu_note: sampler.gpu.error.clone().unwrap_or_default(),
+                control_on,
+                control_note: control_note.as_ref().map(|n| n.lock().unwrap().clone()).unwrap_or_default(),
                 ports: ports.clone(),
                 sample: Some(payload),
             };

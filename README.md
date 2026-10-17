@@ -106,6 +106,16 @@ PC reports). Put the token in `relay/.env` (git-ignored):
 `printf 'MONI_WAKE_TOKEN=%s\n' "$(openssl rand -hex 24)" > relay/.env`. The
 home page (home-lofi) calls it from its server, behind the Authelia login.
 
+**Turn off:** `POST /shutdown` (same header) asks the Moni service on the PC
+to shut Windows down 30 s later (`shutdown /a` on the PC cancels). The relay
+signs the request with `MONI_PC_KEY` (HMAC-SHA256 over time and a one-off
+nonce, valid 60 s, single use) and sends it to TCP 5008 on the PC, which the
+installer opens to the local subnet only. Add the key to `relay/.env`
+(`printf 'MONI_PC_KEY=%s\n' "$(openssl rand -hex 24)" >> relay/.env`, then
+`docker compose up -d`) and paste the same value into the Moni app under
+Settings → Turn off from the home page. Status shows `can_shutdown` once the
+PC announces its listener (within a minute) and `Turning off…` after a request.
+
 ## Windows gaming PC (Python sender)
 
 The Windows sender is designed for an AMD Ryzen CPU and NVIDIA RTX GPU. It

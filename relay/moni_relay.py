@@ -11,11 +11,17 @@ anything, so the clock is unaffected) and serves the latest reading over HTTP:
   POST /wake    send a Wake-on-LAN magic packet to the PC; needs the header
                 "Authorization: Bearer <MONI_WAKE_TOKEN>" (wake is disabled
                 when no token is configured)
+  POST /shutdown  same header; asks the PC's Moni service to shut Windows
+                down. The relay signs the request with MONI_PC_KEY (the same
+                key is set in the Moni app on the PC); off until both are set
+                and the PC's hello announces its listener ("ctl": port)
 
 No packet for OFFLINE_AFTER seconds means the PC is off or asleep.
 """
 
+import hashlib
 import hmac
+import http.client
 import json
 import os
 import re
@@ -35,9 +41,12 @@ WAKE_TOKEN = os.environ.get("MONI_WAKE_TOKEN", "")
 # Comma-separated broadcast addresses for the magic packet.
 WAKE_TARGETS = [t.strip() for t in os.environ.get("MONI_WAKE_BROADCAST", "255.255.255.255").split(",") if t.strip()]
 WAKING_FOR = 180.0  # seconds to show "Waking…" after a wake request
+PC_KEY = os.environ.get("MONI_PC_KEY", "")
+STOPPING_FOR = 120.0  # seconds to show "Turning off…" after a shutdown request
 
 lock = threading.Lock()
-latest = {"packet": None, "at": 0.0, "sender": "", "host": "", "last_seen": 0.0, "woken_at": 0.0}
+latest = {"packet": None, "at": 0.0, "sender": "", "host": "", "ctl": 0, "last_seen": 0.0, "woken_at": 0.0,
+          "stopping_at": 0.0}
 
 
 def listen() -> None:
@@ -55,6 +64,8 @@ def listen() -> None:
         with lock:
             if packet.get("type") == "hello":
                 latest["host"] = str(packet.get("host", ""))[:64]
+                ctl = packet.get("ctl")
+                latest["ctl"] = ctl if isinstance(ctl, int) and 0 < ctl < 65536 else 0
                 continue
             if packet.get("v") != 1 or (WANT_OS and packet.get("os") != WANT_OS):
                 continue
@@ -105,6 +116,35 @@ def wake() -> None:
         latest["woken_at"] = time.monotonic()
 
 
+def can_shutdown() -> bool:
+    with lock:
+        ctl = latest["ctl"]
+    return bool(len(PC_KEY) >= 16 and WAKE_TOKEN and ctl)
+
+
+def shutdown() -> dict:
+    """Signed POST to the PC's Moni service. Raises OSError when it can't be reached."""
+    with lock:
+        host, port = latest["sender"], latest["ctl"]
+    stamp, nonce = str(int(time.time())), os.urandom(16).hex()
+    sig = hmac.new(PC_KEY.encode(), f"moni-shutdown|{stamp}|{nonce}".encode(), hashlib.sha256).hexdigest()
+    conn = http.client.HTTPConnection(host, port, timeout=4)
+    try:
+        conn.request("POST", "/shutdown", headers={"X-Moni-Time": stamp, "X-Moni-Nonce": nonce, "X-Moni-Sig": sig,
+                                                   "Content-Length": "0"})
+        response = conn.getresponse()
+        try:
+            body = json.loads(response.read(4096) or b"{}")
+        except ValueError:
+            body = {}
+    finally:
+        conn.close()
+    if response.status == 200 and body.get("ok") is True:
+        with lock:
+            latest["stopping_at"] = time.monotonic()
+    return {"code": response.status, **(body if isinstance(body, dict) else {})}
+
+
 def status() -> dict:
     with lock:
         packet, at, sender, host, last_seen, woken_at = (
@@ -121,15 +161,20 @@ def status() -> dict:
                 "ssd": "–", "fan": "–", "net": "–", "uptime": "–",
                 "last_seen": ago, "host": host, "sender": sender}
     p = packet
+    with lock:
+        stopping_at = latest["stopping_at"]
+    stopping = bool(stopping_at) and time.monotonic() - stopping_at < STOPPING_FOR
     sysw = num(p, "sysw")
     power = f"{sysw:.0f} W" if sysw > 0 else "–"
     if p.get("pwrmode") == "parts" and sysw > 0:
         power += " (CPU+GPU)"
     return {
-        "status": "Online",
+        "status": "Turning off…" if stopping else "Online",
         "online": True,
         "waking": False,
+        "stopping": stopping,
         "can_wake": bool(WAKE_MAC and WAKE_TOKEN),
+        "can_shutdown": can_shutdown(),
         "cpu": f"{num(p, 'cpu'):.0f}% · {temp(num(p, 'ct'))}",
         "gpu": f"{num(p, 'gpu'):.0f}% · {temp(num(p, 'gt'))}",
         "ram": f"{num(p, 'ram'):.0f}% of {num(p, 'ramgb'):.0f} GB",
@@ -169,15 +214,22 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, body)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path.split("?", 1)[0].rstrip("/") != "/wake":
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path not in ("/wake", "/shutdown"):
             self.send_error(404)
             return
-        if not (WAKE_MAC and WAKE_TOKEN):
-            self.reply(503, {"ok": False, "error": "wake is not configured"})
+        if not WAKE_TOKEN:
+            self.reply(503, {"ok": False, "error": "no MONI_WAKE_TOKEN configured"})
             return
         supplied = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
         if not hmac.compare_digest(supplied.encode(), WAKE_TOKEN.encode()):
             self.reply(401, {"ok": False, "error": "unauthorized"})
+            return
+        if path == "/shutdown":
+            self.post_shutdown()
+            return
+        if not WAKE_MAC:
+            self.reply(503, {"ok": False, "error": "wake is not configured"})
             return
         if is_online():
             self.reply(200, {"ok": True, "sent": False, "status": "already online"})
@@ -189,6 +241,25 @@ class Handler(BaseHTTPRequestHandler):
             return
         print(f"moni-relay: wake packet sent to {WAKE_MAC}", flush=True)
         self.reply(200, {"ok": True, "sent": True, "status": "Waking…"})
+
+    def post_shutdown(self) -> None:
+        if not is_online():
+            self.reply(200, {"ok": True, "sent": False, "status": "already off"})
+            return
+        if not can_shutdown():
+            self.reply(503, {"ok": False, "error": "turn-off is not set up (MONI_PC_KEY here, the key in the Moni app)"})
+            return
+        try:
+            result = shutdown()
+        except OSError as error:
+            self.reply(502, {"ok": False, "error": f"PC unreachable: {error}"})
+            return
+        if result.get("ok") is not True:
+            print(f"moni-relay: the PC refused shutdown ({result.get('code')}): {result.get('error')}", flush=True)
+            self.reply(502, {"ok": False, "error": f"the PC refused: {result.get('error', result.get('code'))}"})
+            return
+        print("moni-relay: shutdown requested", flush=True)
+        self.reply(200, {"ok": True, "sent": True, "status": "Turning off…"})
 
     def reply(self, code: int, body: dict) -> None:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")

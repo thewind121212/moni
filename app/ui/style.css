@@ -131,7 +131,7 @@ main { padding: 8px 20px 24px; display: grid; gap: 14px; }
 .row.stack { display: grid; gap: 6px; }
 .radio { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 
-input[type="text"], select {
+input[type="text"], input[type="password"], select {
   width: 100%;
   font: inherit;
   color: var(--text);

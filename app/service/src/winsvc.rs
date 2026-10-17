@@ -1,5 +1,6 @@
 //! Windows Service Control Manager glue.
 
+use moni_core::control::CONTROL_PORT;
 use moni_core::engine::{self, Options};
 use moni_core::paths::{self, SERVICE_NAME};
 use std::ffi::{OsStr, OsString};
@@ -148,6 +149,35 @@ fn stop_helper() {
     }
 }
 
+const FIREWALL_RULE: &str = "Moni remote shutdown";
+
+/// Let moni-relay on the LAN reach the remote-shutdown listener (it still
+/// refuses everything until a key is set in Moni). Local subnet only, every
+/// network profile: home Ethernet is often marked Public.
+fn allow_control_port() {
+    remove_firewall_rule();
+    let exe = std::env::current_exe().unwrap_or_default();
+    let result = std::process::Command::new("netsh")
+        .args(["advfirewall", "firewall", "add", "rule"])
+        .arg(format!("name={FIREWALL_RULE}"))
+        .args(["dir=in", "action=allow", "protocol=TCP", "remoteip=localsubnet", "profile=any"])
+        .arg(format!("localport={CONTROL_PORT}"))
+        .arg(format!("program={}", exe.display()))
+        .output();
+    match result {
+        Ok(out) if out.status.success() => paths::log(&format!("firewall: allowed TCP {CONTROL_PORT} from the local subnet")),
+        Ok(out) => paths::log(&format!("firewall rule failed: {}", String::from_utf8_lossy(&out.stdout).trim())),
+        Err(error) => paths::log(&format!("firewall rule failed: {error}")),
+    }
+}
+
+fn remove_firewall_rule() {
+    let _ = std::process::Command::new("netsh")
+        .args(["advfirewall", "firewall", "delete", "rule"])
+        .arg(format!("name={FIREWALL_RULE}"))
+        .output();
+}
+
 fn manager(access: ServiceManagerAccess) -> Result<ServiceManager, String> {
     ServiceManager::local_computer(None::<&str>, access).map_err(|e| format!("open service manager (run as administrator): {e}"))
 }
@@ -176,6 +206,7 @@ pub fn install() -> Result<(), String> {
     prepare_data_dir();
     retire_python_sender();
     install_pawnio();
+    allow_control_port();
     let manager = manager(ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)?;
     let info = ServiceInfo {
         name: SERVICE_NAME.into(),
@@ -219,6 +250,7 @@ pub fn install() -> Result<(), String> {
 pub fn uninstall() -> Result<(), String> {
     let manager = manager(ServiceManagerAccess::CONNECT)?;
     let access = ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE;
+    remove_firewall_rule();
     let Ok(service) = manager.open_service(SERVICE_NAME, access) else {
         stop_helper();
         return Ok(());

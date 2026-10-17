@@ -42,6 +42,9 @@ pub struct Config {
     pub ssd_sensor: String,
     pub interval_ms: u64,
     pub baud: u32,
+    /// Shared with moni-relay (MONI_PC_KEY) so the home page can turn this PC
+    /// off; empty = remote shutdown off. See [`crate::control`].
+    pub control_key: String,
 }
 
 impl Default for Config {
@@ -56,6 +59,7 @@ impl Default for Config {
             ssd_sensor: String::new(),
             interval_ms: 1000,
             baud: 115_200,
+            control_key: String::new(),
         }
     }
 }
@@ -86,7 +90,17 @@ impl Config {
         self.fan_sensor = self.fan_sensor.trim().to_string();
         self.mobo_sensor = self.mobo_sensor.trim().to_string();
         self.ssd_sensor = self.ssd_sensor.trim().to_string();
+        self.control_key = self.control_key.trim().to_string();
         self
+    }
+
+    /// For logs: the key never goes into service.log.
+    pub fn redacted(&self) -> Config {
+        let mut copy = self.clone();
+        if !copy.control_key.is_empty() {
+            copy.control_key = "<set>".into();
+        }
+        copy
     }
 }
 

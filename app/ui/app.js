@@ -25,6 +25,7 @@ function readForm() {
     mobo_sensor: $("mobo-sensor").value,
     ssd_sensor: $("ssd-sensor").value,
     interval_ms: Number($("interval").value),
+    control_key: $("control-key").value.trim(),
   };
 }
 
@@ -38,6 +39,7 @@ function fillForm() {
     radio.checked = radio.value === (fixed ? "fixed" : "auto");
   }
   $("wifi-target").value = config.wifi_target;
+  $("control-key").value = config.control_key;
   $("interval").value = String(config.interval_ms);
   if (![...$("interval").options].some((o) => o.selected)) {
     $("interval").add(new Option(`Every ${config.interval_ms} ms`, String(config.interval_ms), true, true));
@@ -218,6 +220,7 @@ function renderDiag(status) {
     ["WiFi", status.wifi_note || "–"],
     ["GPU", status.gpu_note ? `${status.gpu_name} (${status.gpu_note})` : status.gpu_name],
     ["Sensors", status.sensors_ok ? "LibreHardwareMonitor OK" : status.sensors_note || "–"],
+    ["Turn off", status.control_on ? status.control_note : "off (no key)"],
   ];
   $("diag").replaceChildren(
     ...rows.flatMap(([k, v]) => {
@@ -300,7 +303,7 @@ async function start() {
   setOptions($("ssd-sensor"), [["", "Auto (hottest drive)"]], config.ssd_sensor);
   $("autostart").checked = await invoke("get_autostart");
 
-  for (const id of ["enabled", "serial-port", "fan-sensor", "mobo-sensor", "ssd-sensor", "interval"]) {
+  for (const id of ["enabled", "serial-port", "fan-sensor", "mobo-sensor", "ssd-sensor", "interval", "control-key"]) {
     $(id).addEventListener("change", save);
   }
   for (const radio of document.querySelectorAll('input[name="transport"], input[name="wifimode"]')) {

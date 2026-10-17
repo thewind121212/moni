@@ -2,6 +2,7 @@
 //! the desktop app reads the same config/status types.
 
 pub mod config;
+pub mod control;
 pub mod engine;
 pub mod gpu;
 pub mod hardware;

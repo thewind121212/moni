@@ -59,6 +59,9 @@ pub struct Hello {
     pub gpu_name: String,
     pub cores: usize,
     pub ram_gb: u64,
+    /// TCP port of the remote-shutdown listener, 0 = off. moni-relay shows the
+    /// home page's Turn off button only when this is set.
+    pub ctl: u16,
 }
 
 fn round(value: f64, digits: i32) -> f64 {
@@ -226,6 +229,7 @@ impl Sampler {
             gpu_name: self.gpu.name.clone(),
             cores: self.system.cpus().len(),
             ram_gb: (self.system.total_memory() as f64 / GIB).round() as u64,
+            ctl: 0,
         }
     }
 }
