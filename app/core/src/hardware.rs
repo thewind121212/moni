@@ -174,7 +174,35 @@ fn best(rows: &[&Row], score: impl Fn(&Row) -> i32) -> f64 {
         .unwrap_or(0.0)
 }
 
-pub fn pick(rows: &[Row], fan_selector: &str) -> Picked {
+/// User overrides from Settings: a sensor identifier (or any unique part of
+/// its name/identifier). Empty means pick automatically.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Choices<'a> {
+    pub fan: &'a str,
+    pub mobo: &'a str,
+    pub ssd: &'a str,
+}
+
+/// Exact identifier match first, then substring of name/id/parent.
+fn chosen<'a>(rows: &[&'a Row], selector: &str) -> Option<&'a Row> {
+    if selector.is_empty() {
+        return None;
+    }
+    let wanted = lower(selector);
+    rows.iter()
+        .find(|r| lower(&r.id) == wanted)
+        .or_else(|| rows.iter().find(|r| lower(&format!("{} {} {}", r.name, r.id, r.parent)).contains(&wanted)))
+        .copied()
+}
+
+/// Unlabelled Super I/O channels: LibreHardwareMonitor names channel N
+/// "Temperature #N+1" when it does not know the board.
+fn generic_name(row: &Row) -> bool {
+    let name = lower(&row.name);
+    name.starts_with("temperature #") || name == "temperature"
+}
+
+pub fn pick(rows: &[Row], choices: Choices) -> Picked {
     let of = |kind: &str| -> Vec<&Row> {
         rows.iter().filter(|r| r.kind.eq_ignore_ascii_case(kind)).collect()
     };
@@ -183,7 +211,7 @@ pub fn pick(rows: &[Row], fan_selector: &str) -> Picked {
     let fans: Vec<&Row> = of("fan").into_iter().filter(|r| r.value > 0.0).collect();
     let clocks: Vec<&Row> = of("clock").into_iter().filter(|r| r.value > 0.0).collect();
     let throughput = of("throughput");
-    let selector = lower(fan_selector);
+    let selector = lower(choices.fan);
     let text = |row: &Row| lower(&format!("{} {} {}", row.name, row.id, row.parent));
 
     let temperature_score = |row: &Row| {
@@ -227,32 +255,46 @@ pub fn pick(rows: &[Row], fan_selector: &str) -> Picked {
             1
         }
     };
+    // Disconnected thermistors read 0, -55 or 127+; never show those.
+    let plausible = |row: &Row| row.value > 0.0 && row.value < 120.0;
     let mobo_temp_score = |row: &Row| {
         let t = text(row);
-        if ["cpu", "gpu", "vrm", "nvme", "storage"].iter().any(|w| t.contains(w)) {
+        let name = lower(&row.name);
+        let id = lower(&row.id);
+        if !plausible(row) || ["cpu", "gpu", "vrm", "mos", "nvme", "storage", "/ssd/", "/hdd/"].iter().any(|w| t.contains(w)) {
             return -1;
         }
-        if t.contains("motherboard") || lower(&row.name).contains("system") {
+        if name.contains("motherboard") || name.contains("system") {
             100
-        } else if lower(&row.id).contains("/lpc/") {
-            50
+        } else if id.contains("/lpc/it") && generic_name(row) && id.ends_with("/temperature/0") {
+            // Gigabyte ITE chips (IT8689E on every B650 board LHM knows):
+            // channel 0 is "System", 1 PCH, 2 CPU, 3 PCIe, 4 VRM MOS, 5 VSoC MOS.
+            90
+        } else if name.contains("pch") || name.contains("chipset") {
+            80
+        } else if id.contains("/lpc/") && !generic_name(row) {
+            // A labelled board sensor we do not recognise (e.g. "PCIe x16").
+            20
         } else {
             -1
         }
     };
-    // Most boards expose no VRM sensor, while every NVMe drive reports SMART
-    // temperature, so the sixth reading is the hottest SSD.
+    // Most boards expose no VRM sensor, while every drive reports SMART
+    // temperature, so the sixth reading is the hottest drive. NVMe drives
+    // also list their Warning/Critical thresholds as temperatures (fixed
+    // values such as 84 C); those are limits, not readings.
     let ssd_temp_score = |row: &Row| {
         let t = text(row);
-        if t.contains("gpu") || t.contains("cpu") {
+        let name = lower(&row.name);
+        let drive = t.contains("/nvme/") || t.contains("/ssd/") || t.contains("/hdd/");
+        if !drive || !plausible(row) || name.contains("warning") || name.contains("critical") {
             return -1;
         }
-        if t.contains("nvme") {
+        if name == "composite temperature" || name == "temperature" {
             100
-        } else if t.contains("/hdd/") || t.contains("storage") || t.contains("ssd") {
-            80
         } else {
-            -1
+            // Individual NVMe sensors (controller, NAND): only without a composite.
+            50
         }
     };
     let total_power_score = |row: &Row| {
@@ -287,10 +329,19 @@ pub fn pick(rows: &[Row], fan_selector: &str) -> Picked {
             .sum()
     };
 
+    let mobo_temp = match chosen(&temperatures, choices.mobo) {
+        Some(row) => row.value,
+        None => best(&temperatures, mobo_temp_score),
+    };
+    let ssd_temp = match chosen(&temperatures, choices.ssd) {
+        Some(row) => row.value,
+        None => best(&temperatures, ssd_temp_score),
+    };
+
     Picked {
         cpu_temp: best(&temperatures, temperature_score),
-        mobo_temp: best(&temperatures, mobo_temp_score),
-        ssd_temp: best(&temperatures, ssd_temp_score),
+        mobo_temp,
+        ssd_temp,
         cpu_w: best(&powers, power_score),
         fan: best(&fans, fan_score),
         cpu_clock: if core_clocks.is_empty() {
@@ -336,7 +387,7 @@ mod tests {
 
     #[test]
     fn picks_like_the_python_sender() {
-        let picked = pick(&sample_rows(), "");
+        let picked = pick(&sample_rows(), Choices::default());
         assert_eq!(picked.cpu_temp, 61.5);
         assert_eq!(picked.mobo_temp, 36.0);
         assert_eq!(picked.ssd_temp, 47.0);
@@ -350,8 +401,64 @@ mod tests {
 
     #[test]
     fn fan_selector_overrides() {
-        assert_eq!(pick(&sample_rows(), "fan #1").fan, 900.0);
-        assert_eq!(pick(&sample_rows(), "nothing matches").fan, 0.0);
+        let fan = |fan| pick(&sample_rows(), Choices { fan, ..Default::default() }).fan;
+        assert_eq!(fan("fan #1"), 900.0);
+        assert_eq!(fan("nothing matches"), 0.0);
+    }
+
+    /// Gigabyte B650M/B650E FORCE: LHM does not know the board, so the
+    /// IT8689E channels are unlabelled; channel 2 is the CPU socket.
+    fn unlabelled_gigabyte() -> Vec<Row> {
+        let mut rows = vec![row("Temperature", "Core (Tctl/Tdie)", "/amdcpu/0/temperature/2", "/amdcpu/0", 51.5)];
+        for (i, value) in [33.0, 45.0, 51.0, 38.0, 47.0, 44.0].into_iter().enumerate() {
+            rows.push(row(
+                "Temperature",
+                &format!("Temperature #{}", i + 1),
+                &format!("/lpc/it8689e/0/temperature/{i}"),
+                "/lpc/it8689e/0",
+                value,
+            ));
+        }
+        for (i, name, value) in [
+            (0, "Composite Temperature", 41.0),
+            (1, "Temperature #1", 41.0),
+            (2, "Temperature #2", 58.0),
+            (10, "Warning Temperature", 84.0),
+            (11, "Critical Temperature", 85.0),
+        ] {
+            rows.push(row("Temperature", name, &format!("/nvme/0/temperature/{i}"), "/nvme/0", value));
+        }
+        rows.push(row("Temperature", "Composite Temperature", "/nvme/1/temperature/0", "/nvme/1", 39.0));
+        rows
+    }
+
+    #[test]
+    fn unlabelled_gigabyte_board_uses_system_channel() {
+        let picked = pick(&unlabelled_gigabyte(), Choices::default());
+        assert_eq!(picked.mobo_temp, 33.0, "channel 0 is System, not the CPU socket (51)");
+    }
+
+    #[test]
+    fn ssd_ignores_nvme_thresholds() {
+        let picked = pick(&unlabelled_gigabyte(), Choices::default());
+        assert_eq!(picked.ssd_temp, 41.0, "hottest composite, not the 84 C warning threshold");
+    }
+
+    #[test]
+    fn labelled_board_prefers_system() {
+        let mut rows = unlabelled_gigabyte();
+        for (r, name) in rows.iter_mut().skip(1).zip(["System", "PCH", "CPU", "PCIe x16", "VRM MOS", "VSoC MOS"]) {
+            r.name = name.into();
+        }
+        assert_eq!(pick(&rows, Choices::default()).mobo_temp, 33.0);
+    }
+
+    #[test]
+    fn manual_choices_override() {
+        let rows = unlabelled_gigabyte();
+        let picked = pick(&rows, Choices { mobo: "/lpc/it8689e/0/temperature/1", ssd: "/nvme/0/temperature/2", ..Default::default() });
+        assert_eq!(picked.mobo_temp, 45.0);
+        assert_eq!(picked.ssd_temp, 58.0);
     }
 
     #[test]

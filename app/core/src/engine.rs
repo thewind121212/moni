@@ -2,7 +2,7 @@
 //! publish status for the app.
 
 use crate::config::{Config, Transport};
-use crate::hardware::{self, SensorFeed};
+use crate::hardware::{self, Choices, SensorFeed};
 use crate::paths;
 use crate::sampler::{Payload, Sampler};
 use crate::transport::{list_ports, PortInfo, SerialLink, UdpLink};
@@ -77,7 +77,11 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
             }
         }
 
-        let payload = sampler.sample(&config.fan_sensor);
+        let payload = sampler.sample(Choices {
+            fan: &config.fan_sensor,
+            mobo: &config.mobo_sensor,
+            ssd: &config.ssd_sensor,
+        });
         let line = serde_json::to_string(&payload).unwrap_or_default();
         let hello = serde_json::to_string(&sampler.hello()).unwrap_or_default();
         let paused = paths::usb_paused();

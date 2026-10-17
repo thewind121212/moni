@@ -37,6 +37,9 @@ pub struct Config {
     pub wifi_target: String,
     /// Substring of the CPU-fan sensor name or identifier; empty auto-picks.
     pub fan_sensor: String,
+    /// Motherboard / SSD temperature sensor identifiers; empty auto-picks.
+    pub mobo_sensor: String,
+    pub ssd_sensor: String,
     pub interval_ms: u64,
     pub baud: u32,
 }
@@ -49,6 +52,8 @@ impl Default for Config {
             serial_port: String::new(),
             wifi_target: String::new(),
             fan_sensor: String::new(),
+            mobo_sensor: String::new(),
+            ssd_sensor: String::new(),
             interval_ms: 1000,
             baud: 115_200,
         }
@@ -79,6 +84,8 @@ impl Config {
         self.serial_port = self.serial_port.trim().to_string();
         self.wifi_target = self.wifi_target.trim().to_string();
         self.fan_sensor = self.fan_sensor.trim().to_string();
+        self.mobo_sensor = self.mobo_sensor.trim().to_string();
+        self.ssd_sensor = self.ssd_sensor.trim().to_string();
         self
     }
 }

@@ -2,7 +2,7 @@
 //! units match host/monitor_windows.py exactly; the firmware is unchanged.
 
 use crate::gpu::NvidiaGpu;
-use crate::hardware::{self, Row, SensorFeed};
+use crate::hardware::{self, Choices, Row, SensorFeed};
 use serde::{Deserialize, Serialize};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind, System};
@@ -110,14 +110,14 @@ impl Sampler {
         self.sensors.as_ref().map(|feed| feed.rows()).unwrap_or_default()
     }
 
-    pub fn sample(&mut self, fan_selector: &str) -> Payload {
+    pub fn sample(&mut self, choices: Choices) -> Payload {
         self.system.refresh_cpu_specifics(CpuRefreshKind::nothing().with_cpu_usage().with_frequency());
         self.system.refresh_memory();
         self.networks.refresh(true);
         self.disks.refresh(true);
 
         let rows = self.sensor_rows();
-        let picked = hardware::pick(&rows, fan_selector);
+        let picked = hardware::pick(&rows, choices);
         let gpu = self.gpu.sample();
 
         // Network: cumulative counters diffed against the previous sample.
@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn sample_runs_without_helper() {
         let mut sampler = Sampler::new(None);
-        let payload = sampler.sample("");
+        let payload = sampler.sample(Choices::default());
         assert!(payload.threads > 0);
         assert!(serde_json::to_string(&sampler.hello()).unwrap().contains("\"type\":\"hello\""));
     }

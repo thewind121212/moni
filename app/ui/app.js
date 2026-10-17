@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 let config = null;
 let portsKey = "";
 let fansKey = "";
+let tempsKey = "";
 let flashing = false;
 
 // ---------- settings ----------
@@ -21,6 +22,8 @@ function readForm() {
     wifi_target: wifiMode === "fixed" ? $("wifi-target").value.trim() : "",
     serial_port: $("serial-port").value,
     fan_sensor: $("fan-sensor").value,
+    mobo_sensor: $("mobo-sensor").value,
+    ssd_sensor: $("ssd-sensor").value,
     interval_ms: Number($("interval").value),
   };
 }
@@ -68,7 +71,8 @@ async function save() {
   }
 }
 
-function setOptions(select, options, value) {
+function setOptions(select, options, value = "") {
+  value ??= "";
   select.replaceChildren(...options.map(([v, label]) => new Option(label, v)));
   if (value && !options.some(([v]) => v === value)) {
     select.add(new Option(`${value} (not found)`, value));
@@ -91,12 +95,29 @@ async function updateFans() {
   renderSensors(rows);
   const fans = rows.filter((r) => r.type.toLowerCase() === "fan" && !r.id.toLowerCase().includes("/gpu"));
   const key = JSON.stringify(fans.map((f) => f.id));
-  if (key === fansKey || document.activeElement === $("fan-sensor")) return;
-  fansKey = key;
-  const options = [["", "Auto (CPU fan header)"]].concat(
-    fans.map((f) => [f.id, `${f.name} · ${Math.round(f.value)} rpm · ${f.hw || f.parent}`]),
-  );
-  setOptions($("fan-sensor"), options, config.fan_sensor);
+  if (key !== fansKey && document.activeElement !== $("fan-sensor")) {
+    fansKey = key;
+    const options = [["", "Auto (CPU fan header)"]].concat(
+      fans.map((f) => [f.id, `${f.name} · ${Math.round(f.value)} rpm · ${f.hw || f.parent}`]),
+    );
+    setOptions($("fan-sensor"), options, config.fan_sensor);
+  }
+  updateTemps(rows);
+}
+
+const isDrive = (r) => /\/(nvme|ssd|hdd)\//i.test(r.id);
+const isLimit = (r) => /warning|critical/i.test(r.name);
+
+function updateTemps(rows) {
+  const temps = rows.filter((r) => r.type.toLowerCase() === "temperature" && !isLimit(r));
+  const key = JSON.stringify(temps.map((t) => t.id));
+  const busy = [$("mobo-sensor"), $("ssd-sensor")].includes(document.activeElement);
+  if (key === tempsKey || busy) return;
+  tempsKey = key;
+  const label = (t) => [t.id, `${t.name} · ${fmt(t.value)} °C · ${t.hw || t.parent}`];
+  const board = temps.filter((t) => !isDrive(t) && !/\/(amdcpu|intelcpu|gpu)/i.test(t.id));
+  setOptions($("mobo-sensor"), [["", "Auto (board System sensor)"]].concat(board.map(label)), config.mobo_sensor);
+  setOptions($("ssd-sensor"), [["", "Auto (hottest drive)"]].concat(temps.filter(isDrive).map(label)), config.ssd_sensor);
 }
 
 // ---------- live status ----------
@@ -275,9 +296,13 @@ async function start() {
   fillForm();
   setOptions($("serial-port"), [["", "Auto-detect the clock (CH340)"]], config.serial_port);
   setOptions($("fan-sensor"), [["", "Auto (CPU fan header)"]], config.fan_sensor);
+  setOptions($("mobo-sensor"), [["", "Auto (board System sensor)"]], config.mobo_sensor);
+  setOptions($("ssd-sensor"), [["", "Auto (hottest drive)"]], config.ssd_sensor);
   $("autostart").checked = await invoke("get_autostart");
 
-  for (const id of ["enabled", "serial-port", "fan-sensor", "interval"]) $(id).addEventListener("change", save);
+  for (const id of ["enabled", "serial-port", "fan-sensor", "mobo-sensor", "ssd-sensor", "interval"]) {
+    $(id).addEventListener("change", save);
+  }
   for (const radio of document.querySelectorAll('input[name="transport"], input[name="wifimode"]')) {
     radio.addEventListener("change", save);
   }
