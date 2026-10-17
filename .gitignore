@@ -18,3 +18,12 @@ vendor/
 # Runtime logs
 *.log
 *.err
+
+# Windows app build products (app/)
+app/target/
+app/node_modules/
+app/sensors/bin/
+app/sensors/obj/
+app/sensors/publish/
+app/src-tauri/vendor/
+app/src-tauri/gen/

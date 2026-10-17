@@ -1,0 +1,10 @@
+moni-service: feeds the Moni clock from boot, before anyone signs in.
+
+  moni-service install      register + start the Windows service (admin)
+  moni-service uninstall    stop + remove it (admin)
+  moni-service restart      restart it (admin)
+  moni-service run          run the sender in this console
+  moni-service preview [N]  print N JSON lines instead of sending
+  moni-service sensors      list LibreHardwareMonitor sensors (admin)
+
+Settings live in %ProgramData%\Moni\config.json; the Moni app edits them.

@@ -1,0 +1,129 @@
+name: Windows app
+
+# Builds the Moni installer (Tauri app + service + LibreHardwareMonitor helper
+# + PawnIO driver + esptool + firmware). Download it from the run's artifacts,
+# or from the GitHub release when a v* tag is pushed.
+on:
+  push:
+    branches: [main, tauri-app]
+    tags: ["v*"]
+    paths:
+      - "app/**"
+      - "firmware/**"
+      - ".github/workflows/windows-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PAWNIO_URL: https://github.com/namazso/PawnIO.Setup/releases/download/2.2.0/PawnIO_setup.exe
+  ESPTOOL_URL: https://github.com/espressif/esptool/releases/download/v5.6.0/esptool-v5.6.0-windows-amd64.zip
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ hashFiles('firmware/platformio.ini') }}
+
+      - name: Build and merge the flashable image
+        run: |
+          pip install platformio "esptool>=5,<6"
+          ./firmware/build-image.sh
+
+      - name: Check image layout (bootloader 0x1000, partitions 0x8000, app 0x10000)
+        run: |
+          python3 - <<'PY'
+          d = open("firmware/moni-si-hai.bin", "rb").read()
+          assert d[0x1000] == 0xE9, "no bootloader at 0x1000"
+          assert d[0x8000:0x8002] == b"\xaa\x50", "no partition table at 0x8000"
+          assert d[0x10000] == 0xE9, "no app at 0x10000"
+          print(f"ok, {len(d)} bytes")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moni-si-hai-firmware
+          path: firmware/moni-si-hai.bin
+          if-no-files-found: error
+
+  installer:
+    needs: firmware
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: moni-si-hai-firmware
+          path: firmware
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build LibreHardwareMonitor helper
+        run: dotnet publish app/sensors -c Release -o app/sensors/publish
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Download PawnIO driver and esptool
+        shell: pwsh
+        run: |
+          $vendor = "app/src-tauri/vendor"
+          New-Item -ItemType Directory -Force $vendor | Out-Null
+          Invoke-WebRequest $env:PAWNIO_URL -OutFile "$vendor/PawnIO_setup.exe"
+          Invoke-WebRequest $env:ESPTOOL_URL -OutFile esptool.zip
+          Expand-Archive esptool.zip -DestinationPath esptool
+          $exe = Get-ChildItem esptool -Recurse -Filter esptool.exe | Select-Object -First 1
+          if (-not $exe) { throw "esptool.exe not found in $env:ESPTOOL_URL" }
+          Copy-Item $exe.FullName "$vendor/esptool.exe"
+          & "$vendor/esptool.exe" version
+
+      - name: Test shared code
+        working-directory: app
+        run: cargo test -p moni-core
+
+      - name: Build service
+        working-directory: app
+        run: cargo build --release -p moni-service
+
+      - name: Build installer
+        working-directory: app
+        run: |
+          npm ci
+          npx tauri build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Moni-windows-x64
+          path: app/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = @(Get-ChildItem app/target/release/bundle/nsis/*.exe | ForEach-Object FullName) + "firmware/moni-si-hai.bin"
+          gh release create "${{ github.ref_name }}" $files --title "Moni ${{ github.ref_name }}" --generate-notes
