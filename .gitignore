@@ -27,3 +27,6 @@ app/sensors/obj/
 app/sensors/publish/
 app/src-tauri/vendor/
 app/src-tauri/gen/
+
+# moni-relay secrets
+relay/.env

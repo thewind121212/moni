@@ -97,8 +97,14 @@ Homepage `services.yaml`:
         - { field: power, label: Power }
 ```
 
-Other fields: `ram`, `temps`, `fan`, `net`, `uptime`; `/raw` returns the
-last packet.
+Other fields: `ram`, `temps`, `board`, `ssd`, `fan`, `net`, `uptime`, `n` (raw
+numbers); `/raw` returns the last packet, `/health` is 200 online / 503 offline.
+
+**Wake-on-LAN:** `POST /wake` with `Authorization: Bearer <MONI_WAKE_TOKEN>`
+sends the magic packet to `MONI_WAKE_MAC` (status shows `Waking…` until the
+PC reports). Put the token in `relay/.env` (git-ignored):
+`printf 'MONI_WAKE_TOKEN=%s\n' "$(openssl rand -hex 24)" > relay/.env`. The
+home page (home-lofi) calls it from its server, behind the Authelia login.
 
 ## Windows gaming PC (Python sender)
 

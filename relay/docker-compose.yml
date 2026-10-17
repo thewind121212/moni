@@ -12,10 +12,15 @@ services:
     network_mode: host
     read_only: true
     user: "65534:65534"
+    # .env holds MONI_WAKE_TOKEN (shared with the home page server; not in git)
+    env_file: .env
     environment:
       - PYTHONUNBUFFERED=1
       - MONI_UDP_PORT=5005
       - MONI_HTTP_PORT=5007
+      # Gaming PC's onboard Ethernet (Wake-on-LAN target)
+      - MONI_WAKE_MAC=30:56:0f:a1:12:cb
+      - MONI_WAKE_BROADCAST=10.10.0.255,255.255.255.255
     volumes:
       - ./moni_relay.py:/app/moni_relay.py:ro
     command: ["python", "-I", "/app/moni_relay.py"]
