@@ -41,7 +41,6 @@
       "../target/release/moni-service.exe": "moni-service.exe",
       "../sensors/publish/*": "sensors/",
       "../../firmware/moni-si-hai.bin": "firmware/moni-si-hai.bin",
-      "vendor/esptool.exe": "tools/esptool.exe",
       "vendor/PawnIO_setup.exe": "tools/PawnIO_setup.exe"
     },
     "windows": {

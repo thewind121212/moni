@@ -259,9 +259,9 @@ async function flash() {
 
 function appendLog(line) {
   const log = $("flash-log");
-  // Collapse esptool's progress redraws into one line.
-  if (/^Writing at /.test(line) && /Writing at [^\n]*$/.test(log.textContent)) {
-    log.textContent = log.textContent.replace(/Writing at [^\n]*$/, line);
+  // Keep one progress line instead of one per 10%.
+  if (/^Writing\.\.\. /.test(line) && /Writing\.\.\. [^\n]*$/.test(log.textContent)) {
+    log.textContent = log.textContent.replace(/Writing\.\.\. [^\n]*$/, line);
   } else {
     log.textContent += (log.textContent ? "\n" : "") + line;
   }

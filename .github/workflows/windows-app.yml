@@ -1,7 +1,7 @@
 name: Windows app
 
 # Builds the Moni installer (Tauri app + service + LibreHardwareMonitor helper
-# + PawnIO driver + esptool + firmware). Download it from the run's artifacts,
+# + PawnIO driver + firmware). Download it from the run's artifacts,
 # or from the GitHub release when a v* tag is pushed.
 on:
   push:
@@ -18,7 +18,6 @@ permissions:
 
 env:
   PAWNIO_URL: https://github.com/namazso/PawnIO.Setup/releases/download/2.2.0/PawnIO_setup.exe
-  ESPTOOL_URL: https://github.com/espressif/esptool/releases/download/v5.6.0/esptool-v5.6.0-windows-amd64.zip
 
 jobs:
   firmware:
@@ -86,18 +85,15 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
 
-      - name: Download PawnIO driver and esptool
+      - name: Download PawnIO driver
         shell: pwsh
         run: |
           $vendor = "app/src-tauri/vendor"
           New-Item -ItemType Directory -Force $vendor | Out-Null
           Invoke-WebRequest $env:PAWNIO_URL -OutFile "$vendor/PawnIO_setup.exe"
-          Invoke-WebRequest $env:ESPTOOL_URL -OutFile esptool.zip
-          Expand-Archive esptool.zip -DestinationPath esptool
-          $exe = Get-ChildItem esptool -Recurse -Filter esptool.exe | Select-Object -First 1
-          if (-not $exe) { throw "esptool.exe not found in $env:ESPTOOL_URL" }
-          Copy-Item $exe.FullName "$vendor/esptool.exe"
-          & "$vendor/esptool.exe" version
+          # Official signed build; refuse anything else.
+          $sig = Get-AuthenticodeSignature "$vendor/PawnIO_setup.exe"
+          if ($sig.Status -ne "Valid") { throw "PawnIO_setup.exe signature: $($sig.Status)" }
 
       - name: Test shared code
         working-directory: app

@@ -65,7 +65,7 @@ Build it yourself on Windows (Rust, .NET 8 SDK, Node 22):
 
 ```powershell
 dotnet publish app/sensors -c Release -o app/sensors/publish
-# put PawnIO_setup.exe and esptool.exe in app/src-tauri/vendor/ (see the workflow)
+# put PawnIO_setup.exe in app/src-tauri/vendor/ (see the workflow)
 cd app; cargo build --release -p moni-service; npm ci; npx tauri build
 ```
 

@@ -1,14 +1,17 @@
-//! Flash the bundled clock firmware with the bundled esptool.exe. The service
-//! owns the COM port, so it is asked to let go first via the pause file.
+//! Flash the bundled clock firmware over USB with espflash (no external
+//! tools). The service owns the COM port, so it is asked to let go first via
+//! the pause file.
 
+use espflash::connection::{Connection, ResetAfterOperation, ResetBeforeOperation};
+use espflash::flasher::Flasher;
+use espflash::target::{Chip, ProgressCallbacks};
 use moni_core::config::Config;
 use moni_core::engine::Status;
 use moni_core::paths;
 use moni_core::transport::resolve_port;
 use serde::Serialize;
-use std::io::Read;
+use serialport::{SerialPortType, UsbPortInfo};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -19,13 +22,13 @@ pub struct FirmwareInfo {
     available: bool,
 }
 
-fn bundled(app: &AppHandle, relative: &str) -> Result<PathBuf, String> {
-    Ok(app.path().resource_dir().map_err(|e| e.to_string())?.join(relative))
+fn bundled_image(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().resource_dir().map_err(|e| e.to_string())?.join("firmware").join("moni-si-hai.bin"))
 }
 
 #[tauri::command]
 pub fn firmware_info(app: AppHandle) -> FirmwareInfo {
-    let path = bundled(&app, "firmware/moni-si-hai.bin").unwrap_or_default();
+    let path = bundled_image(&app).unwrap_or_default();
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     FirmwareInfo { path: path.to_string_lossy().into(), size, available: size > 0 }
 }
@@ -59,6 +62,34 @@ fn emit(app: &AppHandle, line: &str) {
     let _ = app.emit("flash-log", line.to_string());
 }
 
+/// Reports progress to the UI in 10% steps.
+struct Progress<'a> {
+    app: &'a AppHandle,
+    total: usize,
+    last: usize,
+}
+
+impl ProgressCallbacks for Progress<'_> {
+    fn init(&mut self, addr: u32, total: usize) {
+        self.total = total.max(1);
+        self.last = 0;
+        emit(self.app, &format!("Writing {total} bytes at {addr:#x}..."));
+    }
+    fn update(&mut self, current: usize) {
+        let percent = current * 100 / self.total;
+        if percent >= self.last + 10 {
+            self.last = percent - percent % 10;
+            emit(self.app, &format!("Writing... {}%", self.last));
+        }
+    }
+    fn verifying(&mut self) {
+        emit(self.app, "Verifying...");
+    }
+    fn finish(&mut self, skipped: bool) {
+        emit(self.app, if skipped { "Already up to date (skipped)." } else { "Written." });
+    }
+}
+
 #[tauri::command]
 pub async fn flash_firmware(app: AppHandle) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || flash(&app))
@@ -66,11 +97,47 @@ pub async fn flash_firmware(app: AppHandle) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+fn usb_info(port: &str) -> UsbPortInfo {
+    serialport::available_ports()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|p| p.port_name.eq_ignore_ascii_case(port))
+        .and_then(|p| match p.port_type {
+            SerialPortType::UsbPort(info) => Some(info),
+            _ => None,
+        })
+        .unwrap_or(UsbPortInfo { vid: 0, pid: 0, serial_number: None, manufacturer: None, product: None })
+}
+
+fn write_image(app: &AppHandle, port: &str, image: &[u8], baud: u32) -> Result<(), String> {
+    // espflash connects at 115200, then switches to `baud` for the transfer.
+    let serial = serialport::new(port, 115_200)
+        .flow_control(serialport::FlowControl::None)
+        .open_native()
+        .map_err(|e| format!("cannot open {port}: {e}"))?;
+    let connection = Connection::new(
+        serial,
+        usb_info(port),
+        ResetAfterOperation::HardReset,
+        ResetBeforeOperation::DefaultReset,
+        115_200,
+    );
+    emit(app, &format!("Connecting to the clock on {port}..."));
+    let mut flasher = Flasher::connect(connection, true, true, false, Some(Chip::Esp32), Some(baud))
+        .map_err(|e| format!("could not enter the bootloader: {e}"))?;
+    let mut progress = Progress { app, total: 1, last: 0 };
+    flasher
+        .write_bin_to_flash(0x0, image, &mut progress)
+        .map_err(|e| format!("write failed: {e}"))
+}
+
 fn flash(app: &AppHandle) -> Result<String, String> {
-    let esptool = bundled(app, "tools/esptool.exe")?;
-    let image = bundled(app, "firmware/moni-si-hai.bin")?;
-    if !esptool.exists() || !image.exists() {
-        return Err("esptool or the firmware image is missing from this install.".into());
+    let path = bundled_image(app)?;
+    let image = std::fs::read(&path).map_err(|e| format!("firmware image missing from this install: {e}"))?;
+    // A full image starts with the bootloader at 0x1000; refuse a bare app
+    // image, which would overwrite the bootloader at 0x0.
+    if image.len() < 0x10001 || image[0x1000] != 0xE9 || image[0x8000..0x8002] != [0xAA, 0x50] {
+        return Err("The bundled firmware is not a full flash image; refusing to write it.".into());
     }
 
     let _pause = Pause::start()?;
@@ -86,60 +153,19 @@ fn flash(app: &AppHandle) -> Result<String, String> {
         .ok_or("Clock not found. Plug it into this PC with a USB data cable and try again.")?;
 
     let mut last_error = String::new();
-    for baud in ["460800", "115200"] {
-        emit(app, &format!("Flashing {} to {port} at {baud} baud...", image.display()));
-        let mut command = Command::new(&esptool);
-        command
-            .args(["--chip", "esp32", "--port", &port, "--baud", baud, "write-flash", "0x0"])
-            .arg(&image)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        let mut child = command.spawn().map_err(|e| format!("cannot start esptool: {e}"))?;
-        let mut stderr = child.stderr.take();
-        let errors = std::thread::spawn(move || {
-            let mut text = String::new();
-            if let Some(stderr) = stderr.as_mut() {
-                let _ = stderr.read_to_string(&mut text);
+    for baud in [460_800, 115_200] {
+        match write_image(app, &port, &image, baud) {
+            Ok(()) => {
+                emit(app, "Done. The clock restarts with the new firmware.");
+                return Ok(format!("Firmware updated on {port}."));
             }
-            text
-        });
-        // esptool redraws its progress bar with \r; forward each line.
-        if let Some(mut stdout) = child.stdout.take() {
-            let mut buffer = [0u8; 512];
-            let mut line = Vec::new();
-            while let Ok(read) = stdout.read(&mut buffer) {
-                if read == 0 {
-                    break;
-                }
-                for &byte in &buffer[..read] {
-                    if byte == b'\n' || byte == b'\r' {
-                        if !line.is_empty() {
-                            emit(app, String::from_utf8_lossy(&line).trim());
-                            line.clear();
-                        }
-                    } else {
-                        line.push(byte);
-                    }
+            Err(error) => {
+                last_error = error;
+                if baud != 115_200 {
+                    emit(app, &format!("{last_error}; retrying slower..."));
+                    std::thread::sleep(Duration::from_secs(1));
                 }
             }
-        }
-        let status = child.wait().map_err(|e| e.to_string())?;
-        let stderr_text = errors.join().unwrap_or_default();
-        if !stderr_text.trim().is_empty() {
-            emit(app, stderr_text.trim());
-        }
-        if status.success() {
-            emit(app, "Done. The clock restarts with the new firmware.");
-            return Ok(format!("Firmware updated on {port}."));
-        }
-        last_error = format!("esptool failed ({status})");
-        if baud != "115200" {
-            emit(app, &format!("{last_error}; retrying slower..."));
         }
     }
     Err(last_error)

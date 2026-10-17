@@ -74,6 +74,80 @@ fn prepare_data_dir() {
         .output();
 }
 
+fn install_dir() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_default()
+}
+
+/// Kill processes whose command line contains `needle` (case-insensitive).
+fn kill_matching(needle: &str) -> usize {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always).with_exe(UpdateKind::Always),
+    );
+    let needle = needle.to_lowercase();
+    let own = std::process::id();
+    let mut killed = 0;
+    for (pid, process) in system.processes() {
+        if pid.as_u32() == own {
+            continue;
+        }
+        let mut text = process.name().to_string_lossy().to_lowercase();
+        for arg in process.cmd() {
+            text.push(' ');
+            text.push_str(&arg.to_string_lossy().to_lowercase());
+        }
+        if text.contains(&needle) && process.kill() {
+            killed += 1;
+        }
+    }
+    killed
+}
+
+/// Before this app, telemetry came from host\monitor_windows.py started by a
+/// Startup-folder shortcut. Stop it and remove the shortcut so it cannot
+/// fight the service for the COM port.
+fn retire_python_sender() {
+    if kill_matching("monitor_windows.py") > 0 {
+        paths::log("stopped the old Python sender");
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let shortcut = std::path::PathBuf::from(appdata)
+            .join("Microsoft\\Windows\\Start Menu\\Programs\\Startup\\Moni ESP32 Display.lnk");
+        if std::fs::remove_file(&shortcut).is_ok() {
+            paths::log("removed the old Python sender's startup shortcut");
+        }
+    }
+}
+
+/// LibreHardwareMonitor reads Ryzen/SuperIO sensors through the signed PawnIO
+/// driver. Its setup exits without changes when PawnIO is already installed.
+fn install_pawnio() {
+    let setup = install_dir().join("tools").join("PawnIO_setup.exe");
+    if !setup.exists() {
+        return;
+    }
+    match std::process::Command::new(&setup).args(["-install", "-silent"]).status() {
+        Ok(status) => paths::log(&format!("PawnIO setup finished ({status})")),
+        Err(error) => paths::log(&format!("PawnIO setup failed: {error}")),
+    }
+}
+
+/// The helper normally exits with the service; make sure before files are replaced.
+fn stop_helper() {
+    for _ in 0..20 {
+        if kill_matching("moni-sensors.exe") == 0 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 fn manager(access: ServiceManagerAccess) -> Result<ServiceManager, String> {
     ServiceManager::local_computer(None::<&str>, access).map_err(|e| format!("open service manager (run as administrator): {e}"))
 }
@@ -100,6 +174,8 @@ fn stop(service: &windows_service::service::Service) {
 
 pub fn install() -> Result<(), String> {
     prepare_data_dir();
+    retire_python_sender();
+    install_pawnio();
     let manager = manager(ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)?;
     let info = ServiceInfo {
         name: SERVICE_NAME.into(),
@@ -144,9 +220,11 @@ pub fn uninstall() -> Result<(), String> {
     let manager = manager(ServiceManagerAccess::CONNECT)?;
     let access = ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE;
     let Ok(service) = manager.open_service(SERVICE_NAME, access) else {
+        stop_helper();
         return Ok(());
     };
     stop(&service);
+    stop_helper();
     service.delete().map_err(|e| format!("delete service: {e}"))?;
     paths::log("service removed");
     Ok(())
