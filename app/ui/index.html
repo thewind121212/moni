@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Moni</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <div>
+        <h1>Moni</h1>
+        <p class="sub">Clock telemetry</p>
+      </div>
+    </div>
+    <div class="pills">
+      <span class="pill" id="pill-service">Service …</span>
+      <span class="pill" id="pill-usb">USB …</span>
+      <span class="pill" id="pill-wifi">WiFi …</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="card" aria-labelledby="live-title">
+      <div class="card-head">
+        <h2 id="live-title">Live</h2>
+        <span class="muted" id="updated">waiting for the service…</span>
+      </div>
+      <div class="tiles" id="tiles"></div>
+      <p class="banner" id="banner" hidden></p>
+    </section>
+
+    <div class="cols">
+      <section class="card" aria-labelledby="settings-title">
+        <div class="card-head">
+          <h2 id="settings-title">Settings</h2>
+          <span class="saved" id="saved" hidden>Saved</span>
+        </div>
+
+        <label class="row toggle">
+          <span>
+            <strong>Send to clock</strong>
+            <small>The service runs from boot, even before you sign in.</small>
+          </span>
+          <input type="checkbox" id="enabled">
+        </label>
+
+        <div class="row stack">
+          <strong>Connection</strong>
+          <div class="segmented" role="radiogroup" aria-label="Connection">
+            <label><input type="radio" name="transport" value="auto"><span>Auto</span></label>
+            <label><input type="radio" name="transport" value="wifi"><span>WiFi</span></label>
+            <label><input type="radio" name="transport" value="usb"><span>USB</span></label>
+          </div>
+          <small>Auto feeds USB when the clock is plugged in, and WiFi always. The clock's mode button picks which one it listens to.</small>
+        </div>
+
+        <div class="row stack" id="wifi-block">
+          <strong>WiFi clock address</strong>
+          <label class="radio"><input type="radio" name="wifimode" value="auto"> Find automatically (broadcast on my network)</label>
+          <label class="radio"><input type="radio" name="wifimode" value="fixed"> Fixed address</label>
+          <input type="text" id="wifi-target" placeholder="192.168.1.50 or 192.168.1.50:5005" spellcheck="false" autocomplete="off">
+          <small>Press up or down on the clock in WiFi mode to see its address.</small>
+        </div>
+
+        <div class="row stack" id="usb-block">
+          <strong>USB port</strong>
+          <select id="serial-port"></select>
+        </div>
+
+        <div class="row stack">
+          <strong>CPU fan sensor</strong>
+          <select id="fan-sensor"></select>
+          <small>Pick the header your CPU cooler is on if the RPM looks wrong.</small>
+        </div>
+
+        <div class="row stack">
+          <strong>Motherboard temperature sensor</strong>
+          <select id="mobo-sensor"></select>
+        </div>
+
+        <div class="row stack">
+          <strong>SSD temperature sensor</strong>
+          <select id="ssd-sensor"></select>
+          <small>Auto shows the hottest drive's overall (composite) temperature.</small>
+        </div>
+
+        <div class="row stack">
+          <strong>Update rate</strong>
+          <select id="interval">
+            <option value="500">Twice a second</option>
+            <option value="1000">Every second</option>
+            <option value="2000">Every 2 seconds</option>
+          </select>
+        </div>
+
+        <label class="row toggle">
+          <span>
+            <strong>Open Moni at sign-in</strong>
+            <small>Puts this window in the tray. Not needed for the clock itself.</small>
+          </span>
+          <input type="checkbox" id="autostart">
+        </label>
+        <p class="error" id="settings-error" hidden></p>
+      </section>
+
+      <div class="side">
+        <section class="card" aria-labelledby="fw-title">
+          <div class="card-head"><h2 id="fw-title">Clock firmware</h2></div>
+          <p class="muted" id="fw-info">Plug the clock in over USB, then update.</p>
+          <button class="primary" id="flash">Update clock firmware</button>
+          <pre class="log" id="flash-log" hidden></pre>
+        </section>
+
+        <section class="card" aria-labelledby="diag-title">
+          <div class="card-head"><h2 id="diag-title">Diagnostics</h2></div>
+          <dl class="diag" id="diag"></dl>
+          <div class="buttons">
+            <button id="restart">Restart service</button>
+            <button id="open-data">Open data folder</button>
+          </div>
+          <details>
+            <summary>All sensors</summary>
+            <div class="sensor-table" id="sensors"></div>
+          </details>
+        </section>
+      </div>
+    </div>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

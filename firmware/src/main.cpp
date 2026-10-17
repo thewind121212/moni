@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <NeoPixelBus.h>
+#include <Preferences.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -117,6 +118,8 @@ uint32_t lastHistoryAt = 0;
 uint8_t brightness = 220;
 bool screensOn = true;
 bool wifiMode = false;  // false = USB serial, true = WiFi UDP from the PC.
+Preferences settings;   // Remembers wifiMode across power cycles.
+uint32_t wifiCheckedAt = 0;
 WiFiUDP udp;
 char udpLine[768];
 uint32_t ipShownAt = 0;  // Nonzero while the IP screen is up; auto-hides after 3 s.
@@ -487,6 +490,20 @@ void stopWifi() {
   WiFi.mode(WIFI_OFF);
 }
 
+void saveMode() {
+  settings.putBool("wifi", wifiMode);
+}
+
+// After a power cut the router may still be booting. The Arduino core retries
+// most failures on its own; nudge it every 30 s in case it gave up.
+void keepWifiAlive(uint32_t now) {
+  if (!wifiMode || WiFi.status() == WL_CONNECTED) return;
+  if (now - wifiCheckedAt < 30000) return;
+  wifiCheckedAt = now;
+  WiFi.disconnect();
+  WiFi.begin(kWifiSsid, kWifiPassword);
+}
+
 bool packetFromWindows(const char* line) {
   StaticJsonDocument<32> filter;
   filter["os"] = true;
@@ -620,6 +637,7 @@ void handleButtons() {
       startWifi();
       if (screensOn) toast("WIFI", "CONNECTING...", kAmber);
       if (waitForWifi()) {
+        saveMode();
         if (screensOn) {
           toast("WIFI", ipText().c_str(), kGreen);
           delay(1500);
@@ -627,6 +645,7 @@ void handleButtons() {
       } else {
         stopWifi();
         wifiMode = false;
+        saveMode();
         if (screensOn) {
           toast("USB", "FALLBACK TO WIRE", kRed);
           delay(1500);
@@ -634,6 +653,7 @@ void handleButtons() {
       }
     } else {
       stopWifi();
+      saveMode();
       if (screensOn) {
         toast("USB", "SERIAL LINK", kCyan);
         delay(700);
@@ -701,6 +721,17 @@ void setup() {
 
   splash();
   delay(600);
+
+  // Come back on the link chosen last time. WiFi joins in the background (the
+  // header icon stays amber until it does) and never falls back to the wire
+  // on its own: at power-on the router is often slower than the clock.
+  settings.begin("moni", false);
+  wifiMode = settings.getBool("wifi", false);
+  if (wifiMode) {
+    startWifi();
+    wifiCheckedAt = millis();
+  }
+
   renderAll();
   Serial.println("MONI_READY");
 }
@@ -711,6 +742,7 @@ void loop() {
   handleButtons();
 
   const uint32_t now = millis();
+  keepWifiAlive(now);
   if (now - lastHistoryAt >= 1000) {
     lastHistoryAt = now;
     pushHistory();

@@ -31,7 +31,45 @@ physical slots 1–6 are CPU, memory, GPU, I/O, system power, and thermals
 The original firmware is not erased until the new image has compiled and the
 connected board has passed a final identity check.
 
-## Windows gaming PC
+## Windows app (recommended)
+
+`Moni_x.y.z_x64-setup.exe` installs everything the clock needs on a Windows PC;
+no Python and no separate LibreHardwareMonitor window:
+
+- **Moni service** starts at boot, before anyone signs in, and feeds the clock
+  over USB and/or WiFi. Over WiFi it broadcasts on the local network, so the
+  clock is found whatever IP the router gives it (or set a fixed address).
+- **Sensor helper** uses LibreHardwareMonitor's library internally for Ryzen
+  temperature/power, CPU fan, motherboard and SSD temperatures. The installer
+  adds the signed PawnIO driver it needs.
+- **Moni app** (tray icon) for settings: on/off, Auto/WiFi/USB, clock address,
+  CPU fan sensor, update rate, open at sign-in, live readings, and one-click
+  clock firmware updates.
+
+Get the installer from the latest **Windows app** workflow run (Actions tab →
+artifact `Moni-windows-x64`) or from a GitHub release, run it, and approve the
+admin prompt. Windows SmartScreen warns about unsigned installers: choose
+*More info → Run anyway*. The installer stops and removes the old Python
+sender's startup shortcut.
+
+The clock remembers its WiFi/USB mode across power cuts (firmware from this
+version on). Press its mode button once to choose WiFi; from then on it rejoins
+WiFi by itself whenever it powers up.
+
+Settings and logs live in `%ProgramData%\Moni` (`config.json`, `status.json`,
+`service.log`). For troubleshooting, from an admin terminal in the install
+folder: `moni-service.exe sensors` lists every sensor, `moni-service.exe run`
+runs the sender in the console.
+
+Build it yourself on Windows (Rust, .NET 8 SDK, Node 22):
+
+```powershell
+dotnet publish app/sensors -c Release -o app/sensors/publish
+# put PawnIO_setup.exe in app/src-tauri/vendor/ (see the workflow)
+cd app; cargo build --release -p moni-service; npm ci; npx tauri build
+```
+
+## Windows gaming PC (Python sender)
 
 The Windows sender is designed for an AMD Ryzen CPU and NVIDIA RTX GPU. It
 collects CPU load/clock/temperature/power, motherboard and VRM temperatures,
