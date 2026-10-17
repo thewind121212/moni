@@ -1,0 +1,21 @@
+# moni-relay: listens to the gaming PC's Moni broadcasts (UDP 5005) and serves
+# the latest reading at http://<server>:5007/status for the home page.
+#
+# Host networking is required: LAN broadcasts do not reach a bridged
+# container. With UFW's default-drop input policy the server needs:
+#   sudo ufw allow from 10.10.0.0/24 to any port 5005 proto udp     # PC broadcasts
+services:
+  moni-relay:
+    image: python:3.13-alpine
+    container_name: moni-relay
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    user: "65534:65534"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MONI_UDP_PORT=5005
+      - MONI_HTTP_PORT=5007
+    volumes:
+      - ./moni_relay.py:/app/moni_relay.py:ro
+    command: ["python", "-I", "/app/moni_relay.py"]

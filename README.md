@@ -69,6 +69,37 @@ dotnet publish app/sensors -c Release -o app/sensors/publish
 cd app; cargo build --release -p moni-service; npm ci; npx tauri build
 ```
 
+## Home page status card
+
+`relay/` runs on the home server and exposes the PC's telemetry to
+[gethomepage](https://gethomepage.dev): it listens to the same UDP 5005
+broadcasts as the clock (never sending, so the clock is unaffected) and serves
+the latest reading at `http://<server>:5007/status`, or `Offline` after 10 s of
+silence.
+
+```sh
+cd relay && docker compose up -d
+```
+
+Homepage `services.yaml`:
+
+```yaml
+- Gaming PC:
+    icon: mdi-desktop-tower-monitor
+    widget:
+      type: customapi
+      url: http://10.10.0.217:5007/status
+      refreshInterval: 5000
+      mappings:
+        - { field: status, label: Status }
+        - { field: cpu, label: CPU }
+        - { field: gpu, label: GPU }
+        - { field: power, label: Power }
+```
+
+Other fields: `ram`, `temps`, `fan`, `net`, `uptime`; `/raw` returns the
+last packet.
+
 ## Windows gaming PC (Python sender)
 
 The Windows sender is designed for an AMD Ryzen CPU and NVIDIA RTX GPU. It
