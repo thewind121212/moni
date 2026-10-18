@@ -36,7 +36,9 @@ fn run_service() -> windows_service::Result<()> {
     let signal = stop.clone();
     let handler = move |control| match control {
         ServiceControl::Stop | ServiceControl::Shutdown | ServiceControl::Preshutdown => {
-            signal.store(true, Ordering::SeqCst);
+            if !signal.swap(true, Ordering::SeqCst) {
+                paths::log(&format!("stop requested ({control:?})"));
+            }
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -49,7 +51,7 @@ fn run_service() -> windows_service::Result<()> {
         controls_accepted: controls,
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
-        wait_hint: Duration::from_secs(3),
+        wait_hint: STOP_DEADLINE + Duration::from_secs(1),
         process_id: None,
     };
     status.set_service_status(report(
@@ -58,11 +60,40 @@ fn run_service() -> windows_service::Result<()> {
     ))?;
 
     prepare_data_dir();
-    engine::run(stop, Options { preview: false, samples: 0, use_helper: true });
+    let (done, finished) = std::sync::mpsc::channel();
+    let engine_stop = stop.clone();
+    std::thread::spawn(move || {
+        engine::run(engine_stop, Options { preview: false, samples: 0, use_helper: true });
+        let _ = done.send(());
+    });
+
+    // Never hold up Windows: once asked to stop, give the engine STOP_DEADLINE
+    // to let go of the hardware, then leave regardless.
+    let mut asked: Option<Instant> = None;
+    loop {
+        match finished.recv_timeout(Duration::from_millis(100)) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if stop.load(Ordering::SeqCst) {
+            let at = *asked.get_or_insert_with(|| {
+                let _ = status.set_service_status(report(ServiceState::StopPending, ServiceControlAccept::empty()));
+                Instant::now()
+            });
+            if at.elapsed() > STOP_DEADLINE {
+                paths::log("stopping: still busy after 5 s, leaving anyway");
+                kill_matching("moni-sensors.exe");
+                break;
+            }
+        }
+    }
 
     status.set_service_status(report(ServiceState::Stopped, ServiceControlAccept::empty()))?;
-    Ok(())
+    // A thread stuck in a driver call must not keep the process alive.
+    std::process::exit(0);
 }
+
+const STOP_DEADLINE: Duration = Duration::from_secs(5);
 
 /// %ProgramData%\Moni, modifiable by Users so the app (not elevated) can save
 /// settings. Only plain settings live there; nothing in it is executed.

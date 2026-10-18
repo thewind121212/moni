@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -39,20 +40,46 @@ struct Latest {
     error: Option<String>,
 }
 
-/// Owns the helper process and restarts it whenever it exits.
+/// Owns the helper process and restarts it whenever it exits, until [`SensorFeed::stop`].
 pub struct SensorFeed {
     latest: Arc<Mutex<Latest>>,
+    child: Arc<Mutex<Option<Child>>>,
+    stopping: Arc<AtomicBool>,
 }
 
 impl SensorFeed {
     pub fn start(exe: PathBuf, interval_ms: u64) -> SensorFeed {
-        let latest = Arc::new(Mutex::new(Latest::default()));
-        let shared = latest.clone();
+        let feed = SensorFeed {
+            latest: Arc::new(Mutex::new(Latest::default())),
+            child: Arc::new(Mutex::new(None)),
+            stopping: Arc::new(AtomicBool::new(false)),
+        };
+        let (latest, child, stopping) = (feed.latest.clone(), feed.child.clone(), feed.stopping.clone());
         thread::Builder::new()
             .name("moni-sensors".into())
-            .spawn(move || supervise(exe, interval_ms, shared))
+            .spawn(move || supervise(exe, interval_ms, latest, child, stopping))
             .expect("spawn sensor thread");
-        SensorFeed { latest }
+        feed
+    }
+
+    /// Stop the helper for good: close its stdin so it shuts LibreHardwareMonitor
+    /// down cleanly, and kill it if it hasn't exited after 2 s. Returns what happened.
+    pub fn stop(&self) -> String {
+        self.stopping.store(true, Ordering::SeqCst);
+        let Some(mut child) = self.child.lock().unwrap().take() else {
+            return "not running".into();
+        };
+        drop(child.stdin.take());
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            if let Ok(Some(_)) = child.try_wait() {
+                return format!("closed in {} ms", started.elapsed().as_millis());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        "did not close in 2 s, killed".into()
     }
 
     /// Rows from the last 5 s; older data is treated as no data.
@@ -105,12 +132,28 @@ fn spawn(exe: &PathBuf, interval_ms: u64) -> std::io::Result<Child> {
     command.spawn()
 }
 
-fn supervise(exe: PathBuf, interval_ms: u64, latest: Arc<Mutex<Latest>>) {
-    loop {
+fn supervise(
+    exe: PathBuf,
+    interval_ms: u64,
+    latest: Arc<Mutex<Latest>>,
+    slot: Arc<Mutex<Option<Child>>>,
+    stopping: Arc<AtomicBool>,
+) {
+    while !stopping.load(Ordering::SeqCst) {
         match spawn(&exe, interval_ms) {
             Ok(mut child) => {
-                // stdin stays open (held in `child`) so the helper keeps running.
-                if let Some(stdout) = child.stdout.take() {
+                let stdout = child.stdout.take();
+                {
+                    // stdin stays open (held in `slot`) so the helper keeps running.
+                    let mut slot = slot.lock().unwrap();
+                    if stopping.load(Ordering::SeqCst) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return;
+                    }
+                    *slot = Some(child);
+                }
+                if let Some(stdout) = stdout {
                     for line in BufReader::new(stdout).lines() {
                         let Ok(line) = line else { break };
                         let Ok(parsed) = serde_json::from_str::<Line>(&line) else { continue };
@@ -124,8 +167,13 @@ fn supervise(exe: PathBuf, interval_ms: u64, latest: Arc<Mutex<Latest>>) {
                         }
                     }
                 }
-                let _ = child.kill();
-                let status = child.wait();
+                if stopping.load(Ordering::SeqCst) {
+                    return; // stop() owns the child now
+                }
+                let status = slot.lock().unwrap().take().map(|mut child| {
+                    let _ = child.kill();
+                    child.wait()
+                });
                 latest.lock().unwrap().error =
                     Some(format!("sensor helper exited ({status:?}); restarting"));
             }
@@ -358,6 +406,32 @@ pub fn pick(rows: &[Row], choices: Choices) -> Picked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn script(name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("moni-{name}-{}.sh", std::process::id()));
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_closes_the_helper_and_keeps_it_stopped() {
+        // a polite helper: exits when stdin closes
+        let feed = SensorFeed::start(script("polite", "cat >/dev/null"), 1000);
+        thread::sleep(Duration::from_millis(300));
+        assert!(feed.stop().starts_with("closed in"));
+        thread::sleep(Duration::from_millis(300));
+        assert!(feed.child.lock().unwrap().is_none(), "not restarted");
+        // a stuck helper: ignores stdin, gets killed
+        let feed = SensorFeed::start(script("stuck", "exec sleep 30"), 1000);
+        thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        assert_eq!(feed.stop(), "did not close in 2 s, killed");
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
 
     fn row(kind: &str, name: &str, id: &str, parent: &str, value: f64) -> Row {
         Row { name: name.into(), kind: kind.into(), id: id.into(), parent: parent.into(), hw: String::new(), value }

@@ -1,7 +1,8 @@
 // moni-sensors: prints every LibreHardwareMonitor sensor as one JSON line per
 // interval on stdout. moni-service starts it, reads the lines, and picks the
 // CPU temperature/power/fan/clock and motherboard/SSD temperatures from them.
-// The process exits as soon as its parent closes stdin.
+// When its parent closes stdin it closes LibreHardwareMonitor (releasing the
+// PawnIO driver and drive handles) and exits, or is forced out after 1.5 s.
 using System;
 using System.Globalization;
 using System.IO;
@@ -25,12 +26,15 @@ namespace Moni.Sensors
             interval = Math.Max(250, interval);
 
             var stdout = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
+            var stop = new ManualResetEvent(false);
             if (!once)
             {
-                // Parent gone (or service stopped) -> stdin hits EOF -> exit.
+                // Parent gone (or service stopping) -> stdin hits EOF -> close and exit.
                 var watcher = new Thread(() =>
                 {
                     try { while (Console.In.Read() != -1) { } } catch { }
+                    stop.Set();
+                    Thread.Sleep(1500); // the main loop normally returns well before this
                     Environment.Exit(0);
                 }) { IsBackground = true };
                 watcher.Start();
@@ -64,7 +68,7 @@ namespace Moni.Sensors
                         try { computer?.Close(); } catch { }
                         computer = null;
                         if (once) return 1;
-                        Thread.Sleep(5000);
+                        if (stop.WaitOne(5000)) return 0;
                         continue;
                     }
                 }
@@ -80,15 +84,14 @@ namespace Moni.Sensors
                 catch (Exception error)
                 {
                     stdout.WriteLine("{\"error\":" + Quote(error.Message) + "}");
-                    Thread.Sleep(interval);
+                    if (stop.WaitOne(interval)) break;
                     continue;
                 }
                 line.Append("]}");
                 stdout.WriteLine(line.ToString());
-                if (once) break;
-                Thread.Sleep(interval);
+                if (once || stop.WaitOne(interval)) break;
             }
-            computer?.Close();
+            try { computer?.Close(); } catch { }
             return 0;
         }
 

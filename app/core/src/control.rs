@@ -20,8 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const CONTROL_PORT: u16 = 5008;
-/// Seconds Windows waits before shutting down; `shutdown /a` cancels it.
-pub const SHUTDOWN_DELAY: u32 = 30;
+/// Seconds before Windows starts shutting down. 0, like Start > Shut down: the
+/// home page already asked twice.
+pub const SHUTDOWN_DELAY: u32 = 0;
 const MAX_SKEW: u64 = 60;
 const MIN_KEY: usize = 16;
 
@@ -146,7 +147,7 @@ fn handle(mut stream: TcpStream, key: &str, guard: &mut Guard) -> Option<String>
         Ok(()) => match shutdown() {
             Ok(()) => {
                 reply(&mut stream, 200, &format!(r#"{{"ok":true,"in":{SHUTDOWN_DELAY}}}"#));
-                crate::paths::log(&format!("shutdown requested by {} (in {SHUTDOWN_DELAY} s)", peer.ip()));
+                crate::paths::log(&format!("shutdown requested by {}", peer.ip()));
                 Some(format!("shutting down (asked by {})", peer.ip()))
             }
             Err(error) => {
@@ -180,9 +181,9 @@ fn reply(stream: &mut TcpStream, code: u16, body: &str) {
 #[cfg(windows)]
 fn shutdown() -> Result<(), String> {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-    let message = "Moni: turning off from the home page. Run \"shutdown /a\" to cancel.";
+    // /f: nobody is at the PC to answer "this app is preventing shutdown".
     let status = std::process::Command::new(format!(r"{root}\System32\shutdown.exe"))
-        .args(["/s", "/t", &SHUTDOWN_DELAY.to_string(), "/d", "p:0:0", "/c", message])
+        .args(["/s", "/f", "/t", &SHUTDOWN_DELAY.to_string(), "/d", "p:0:0"])
         .status()
         .map_err(|e| e.to_string())?;
     // 1190: a shutdown is already scheduled. That's what was asked for.

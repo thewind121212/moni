@@ -161,7 +161,14 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
             std::thread::sleep(Duration::from_millis(50).min(interval.saturating_sub(started.elapsed())));
         }
     }
-    paths::log("moni-service stopped");
+    // Let go of the hardware before Windows tears the drivers down: a process
+    // stuck in a USB-serial or sensor-driver call can hold up a shutdown.
+    let stopping = Instant::now();
+    serial.close("service stopping");
+    if let Some(feed) = &sampler.sensors {
+        paths::log(&format!("stopping: sensor helper {}", feed.stop()));
+    }
+    paths::log(&format!("moni-service stopped ({} ms)", stopping.elapsed().as_millis()));
 }
 
 fn modified(path: &std::path::Path) -> Option<SystemTime> {

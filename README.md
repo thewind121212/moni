@@ -107,7 +107,8 @@ PC reports). Put the token in `relay/.env` (git-ignored):
 home page (home-lofi) calls it from its server, behind the Authelia login.
 
 **Turn off:** `POST /shutdown` (same header) asks the Moni service on the PC
-to shut Windows down 30 s later (`shutdown /a` on the PC cancels). The relay
+to shut Windows down at once (`shutdown /s /f /t 0`: open apps close without
+saving, since nobody is at the PC to answer them). The relay
 signs the request with `MONI_PC_KEY` (HMAC-SHA256 over time and a one-off
 nonce, valid 60 s, single use) and sends it to TCP 5008 on the PC, which the
 installer opens to the local subnet only. Add the key to `relay/.env`
