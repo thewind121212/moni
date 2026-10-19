@@ -212,6 +212,18 @@ function renderStatus(view) {
 
   updatePorts(status.ports ?? []);
   renderDiag(status);
+  renderRestart(status);
+}
+
+// "1792290000 restarted on COM3" -> shown for a minute after the click
+let restartAskedAt = 0;
+function renderRestart(status) {
+  const [at, ...rest] = (status.restart_note || "").split(" ");
+  const note = $("restart-note");
+  const asked = restartAskedAt && Date.now() / 1000 - restartAskedAt < 60;
+  if (!asked) return void (note.hidden = true);
+  note.hidden = false;
+  note.textContent = Number(at) >= restartAskedAt - 1 ? `Clock ${rest.join(" ")}.` : "Restarting the clock…";
 }
 
 function renderDiag(status) {
@@ -341,6 +353,17 @@ async function start() {
     $("restart").disabled = false;
   });
   $("open-data").addEventListener("click", () => invoke("open_data_folder"));
+  $("restart-clock").addEventListener("click", async () => {
+    $("restart-clock").disabled = true;
+    try {
+      await invoke("restart_clock");
+      restartAskedAt = Math.floor(Date.now() / 1000);
+    } catch (error) {
+      $("settings-error").textContent = String(error);
+      $("settings-error").hidden = false;
+    }
+    setTimeout(() => ($("restart-clock").disabled = false), 3000);
+  });
 
   poll();
   updateFans();

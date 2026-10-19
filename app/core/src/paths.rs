@@ -42,6 +42,20 @@ pub fn pause_path() -> PathBuf {
     data_dir().join("pause-usb")
 }
 
+/// The app drops this to ask the service to reboot the clock over USB.
+pub fn restart_clock_path() -> PathBuf {
+    data_dir().join("restart-clock")
+}
+
+/// Consume a request file: true when it existed and is under 30 s old.
+pub fn take_request(path: &std::path::Path) -> bool {
+    let fresh = fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .map(|at| SystemTime::now().duration_since(at).unwrap_or_default() < Duration::from_secs(30))
+        .unwrap_or(false);
+    fs::remove_file(path).is_ok() && fresh
+}
+
 pub fn log_path() -> PathBuf {
     data_dir().join("service.log")
 }

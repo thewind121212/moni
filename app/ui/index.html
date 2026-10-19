@@ -116,7 +116,11 @@
         <section class="card" aria-labelledby="fw-title">
           <div class="card-head"><h2 id="fw-title">Clock firmware</h2></div>
           <p class="muted" id="fw-info">Plug the clock in over USB, then update.</p>
-          <button class="primary" id="flash">Update clock firmware</button>
+          <div class="buttons">
+            <button class="primary" id="flash">Update clock firmware</button>
+            <button id="restart-clock" title="Reboots the clock over its USB cable, like unplugging it">Restart clock</button>
+          </div>
+          <p class="muted" id="restart-note" hidden></p>
           <pre class="log" id="flash-log" hidden></pre>
         </section>
 

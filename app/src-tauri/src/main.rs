@@ -70,6 +70,13 @@ fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
     Ok(launcher.is_enabled().unwrap_or(enabled))
 }
 
+/// Ask the service (it owns the COM port) to reboot the clock over USB.
+#[tauri::command]
+fn restart_clock() -> Result<(), String> {
+    paths::write_atomic(&paths::restart_clock_path(), b"restart")
+        .map_err(|e| format!("Could not ask the service ({e}). Reinstall Moni so it can prepare its folder."))
+}
+
 /// Restarting a LocalSystem service needs admin: ask through UAC.
 #[tauri::command]
 fn restart_service(app: AppHandle) -> Result<(), String> {
@@ -159,6 +166,7 @@ fn main() {
             get_autostart,
             set_autostart,
             restart_service,
+            restart_clock,
             open_data_folder,
             firmware::flash_firmware,
             firmware::firmware_info,

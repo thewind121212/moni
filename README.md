@@ -43,8 +43,12 @@ no Python and no separate LibreHardwareMonitor window:
   temperature/power, CPU fan, motherboard and SSD temperatures. The installer
   adds the signed PawnIO driver it needs.
 - **Moni app** (tray icon) for settings: on/off, Auto/WiFi/USB, clock address,
-  CPU fan sensor, update rate, open at sign-in, live readings, and one-click
-  clock firmware updates.
+  CPU fan sensor, update rate, open at sign-in, live readings, one-click
+  clock firmware updates, and **Restart clock** (reboots the ESP32 over the
+  USB cable's reset line, like unplugging it).
+- **Screens come back by themselves:** the firmware re-sends the screens'
+  start-up settings every 5 s (no visible change on a working screen), so a
+  module that was re-seated or lost power for a moment wakes up again.
 
 Get the installer from the latest **Windows app** workflow run (Actions tab →
 artifact `Moni-windows-x64`) or from a GitHub release, run it, and approve the

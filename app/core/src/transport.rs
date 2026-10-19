@@ -130,6 +130,45 @@ impl SerialLink {
     }
 }
 
+impl SerialLink {
+    /// Reboot the ESP32 through the USB adapter's auto-reset circuit: RTS pulls
+    /// EN low while DTR (IO0) stays released, the pulse esptool ends a flash
+    /// with. Uses the open port, or opens the clock's port just for this.
+    /// Returns the port name.
+    pub fn restart_clock(&mut self, explicit: &str, baud: u32) -> Result<String, String> {
+        let name = match &self.name {
+            Some(name) => name.clone(),
+            None => resolve_port(explicit, true).ok_or("the clock is not plugged in over USB")?,
+        };
+        let mut opened;
+        let port = match self.port.as_mut() {
+            Some(port) => port,
+            None => {
+                opened = serialport::new(&name, baud)
+                    .timeout(Duration::from_secs(2))
+                    .dtr_on_open(false)
+                    .open()
+                    .map_err(|e| format!("{name}: {e}"))?;
+                &mut opened
+            }
+        };
+        let pulse = |port: &mut Box<dyn SerialPort>| -> serialport::Result<()> {
+            // usbser.sys only applies an RTS change with a DTR write; esptool does the same.
+            port.write_data_terminal_ready(false)?;
+            port.write_request_to_send(true)?;
+            port.write_data_terminal_ready(false)?;
+            std::thread::sleep(Duration::from_millis(100));
+            port.write_request_to_send(false)?;
+            port.write_data_terminal_ready(false)
+        };
+        pulse(port).map_err(|e| format!("{name}: {e}"))?;
+        // Reconnect on the next send, which greets the rebooted clock with hello.
+        self.close("restarting the clock");
+        self.last_attempt = Some(Instant::now());
+        Ok(name)
+    }
+}
+
 impl Default for SerialLink {
     fn default() -> Self {
         Self::new()

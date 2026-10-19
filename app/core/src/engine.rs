@@ -31,6 +31,8 @@ pub struct Status {
     pub sensors_note: String,
     pub gpu_name: String,
     pub gpu_note: String,
+    /// Result of the last "Restart clock", e.g. "restarted 14:02:11 on COM3".
+    pub restart_note: String,
     pub control_on: bool,
     pub control_note: String,
     pub ports: Vec<PortInfo>,
@@ -62,6 +64,7 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
     let mut ports_at: Option<Instant> = None;
     let mut sensors_at: Option<Instant> = None;
     let mut sent = 0u64;
+    let mut restart_note = String::new();
     let control_key = Arc::new(Mutex::new(config.control_key.clone()));
     let control_note = (!options.preview).then(|| control::start(control_key.clone()));
     paths::log(&format!("moni-service {VERSION} started ({:?})", config.transport));
@@ -98,6 +101,16 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
         let hello = serde_json::to_string(&hello).unwrap_or_default();
         let paused = paths::usb_paused();
 
+        if !options.preview && paths::take_request(&paths::restart_clock_path()) {
+            restart_note = match serial.restart_clock(&config.serial_port, config.baud) {
+                Ok(name) => format!("restarted on {name}"),
+                Err(error) => format!("restart failed: {error}"),
+            };
+            paths::log(&format!("clock {restart_note}"));
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            restart_note = format!("{now} {restart_note}");
+        }
+
         if options.preview {
             println!("{line}");
         } else if config.enabled {
@@ -133,6 +146,7 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
                 sensors_note: sensor_error.unwrap_or_default(),
                 gpu_name: sampler.gpu.name.clone(),
                 gpu_note: sampler.gpu.error.clone().unwrap_or_default(),
+                restart_note: restart_note.clone(),
                 control_on,
                 control_note: control_note.as_ref().map(|n| n.lock().unwrap().clone()).unwrap_or_default(),
                 ports: ports.clone(),

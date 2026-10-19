@@ -115,6 +115,7 @@ size_t serialLength = 0;
 uint32_t lastPacketAt = 0;
 uint32_t lastDrawAt = 0;
 uint32_t lastHistoryAt = 0;
+uint32_t lastWakeAt = 0;
 uint8_t brightness = 220;
 bool screensOn = true;
 bool wifiMode = false;  // false = USB serial, true = WiFi UDP from the PC.
@@ -382,6 +383,47 @@ void updateRgb(bool online) {
     pixels.SetPixelColor(physical, c);
   }
   pixels.Show();
+}
+
+// ST7789 set-up as TFT_eSPI's init() sends it, minus the reset pulse: every
+// value here is what a running panel already holds, so re-sending it changes
+// nothing on screen. A module that was re-seated (or browned out) powers up
+// asleep with default settings, though, and this brings it back.
+struct PanelCommand {
+  uint8_t command;
+  uint8_t length;
+  uint8_t data[14];
+};
+constexpr PanelCommand kPanelSetup[] = {
+    {0x13, 0, {}},                    // NORON
+    {0xB6, 2, {0x0A, 0x82}},          // display function control
+    {0xB0, 2, {0x00, 0xE0}},          // RAMCTRL
+    {0x3A, 1, {0x55}},                // COLMOD: 16-bit
+    {0xB2, 5, {0x0C, 0x0C, 0x00, 0x33, 0x33}},  // PORCTRL
+    {0xB7, 1, {0x35}},                // GCTRL
+    {0xBB, 1, {0x28}},                // VCOMS
+    {0xC0, 1, {0x0C}},                // LCMCTRL
+    {0xC2, 2, {0x01, 0xFF}},          // VDVVRHEN
+    {0xC3, 1, {0x10}},                // VRHS
+    {0xC4, 1, {0x20}},                // VDVSET
+    {0xC6, 1, {0x0F}},                // FRCTR2
+    {0xD0, 2, {0xA4, 0xA1}},          // PWCTRL1
+    {0xE0, 14, {0xD0, 0x00, 0x02, 0x07, 0x0A, 0x28, 0x32, 0x44, 0x42, 0x06, 0x0E, 0x12, 0x14, 0x17}},
+    {0xE1, 14, {0xD0, 0x00, 0x02, 0x07, 0x0A, 0x28, 0x31, 0x54, 0x47, 0x0E, 0x1C, 0x17, 0x1B, 0x1E}},
+    {0x21, 0, {}},                    // INVON (IPS)
+};
+
+void wakePanels() {
+  chipSelect.setAll();
+  tft.writecommand(0x11);  // SLPOUT: no effect on an awake panel
+  delay(10);               // a waking panel needs 5 ms before the next command
+  for (const PanelCommand& step : kPanelSetup) {
+    tft.writecommand(step.command);
+    for (uint8_t i = 0; i < step.length; ++i) tft.writedata(step.data[i]);
+  }
+  tft.setRotation(0);  // MADCTL
+  tft.writecommand(screensOn ? 0x29 : 0x28);
+  digitalWrite(kBacklightPin, screensOn ? HIGH : LOW);
 }
 
 void renderAll() {
@@ -750,6 +792,11 @@ void loop() {
   if (ipShownAt && now - ipShownAt >= 3000) {
     ipShownAt = 0;
     if (screensOn) renderAll();
+  }
+  if (now - lastWakeAt >= 5000) {
+    lastWakeAt = now;
+    wakePanels();
+    lastDrawAt = 0;  // redraw now, so a revived panel isn't left blank
   }
   if (screensOn && !ipShownAt && now - lastDrawAt >= 1000) {
     lastDrawAt = now;
