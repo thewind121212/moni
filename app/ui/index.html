@@ -139,6 +139,12 @@
           </div>
 
           <div class="row stack">
+            <strong>Speed <span class="muted" id="lights-speed-value"></span></strong>
+            <input type="range" id="lights-speed" min="25" max="200" step="5">
+            <small>100 % is cpu_rgb.py's speed. Lower is calmer.</small>
+          </div>
+
+          <div class="row stack">
             <strong>LEDs per header</strong>
             <input type="text" id="lights-leds" inputmode="numeric" spellcheck="false" autocomplete="off">
             <small>OpenRGB guesses 10 for an ARGB header; your Jonsbo ZA fans need 120. 0 leaves OpenRGB's sizes alone.</small>

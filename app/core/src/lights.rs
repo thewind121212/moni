@@ -13,8 +13,10 @@
 //! tries again every 5 s and says why in the app.
 
 use crate::config::Lights as Settings;
-use crate::openrgb::{self, Client, Controller, TYPE_MOTHERBOARD};
+use crate::openrgb::{self, Client, Controller, TYPE_MOTHERBOARD, ZONE_SINGLE};
+use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use std::time::{Duration, Instant};
 
 const PHI: f64 = 1.618_033_988_749_895;
@@ -78,15 +80,30 @@ pub fn speed(level: f64) -> f64 {
     SPEED_MIN + (speed_max() - SPEED_MIN) * level.clamp(0.0, 1.0)
 }
 
+/// The comet head's color at an effect level: low -> mid -> high with load
+/// (Fire & Ice: ice -> fire).
+pub fn head(level: f64, combo: &Combo) -> Rgb {
+    let level = level.clamp(0.0, 1.0);
+    match combo.mid {
+        Some(mid) if level < 0.5 => mix(combo.low, mid, level * 2.0),
+        Some(mid) => mix(mid, combo.high, (level - 0.5) * 2.0),
+        None => mix(combo.low, combo.high, level),
+    }
+}
+
+fn dim(c: Rgb, brightness: f64) -> [u8; 3] {
+    c.map(|v| (v * brightness).round().clamp(0.0, 255.0) as u8)
+}
+
 /// One zone's colors: `n` LEDs, the comets at `pos` (0-1, one comet length),
 /// at effect level `level`, dimmed to `brightness` (0-1).
 pub fn frame(n: usize, pos: f64, level: f64, combo: &Combo, brightness: f64) -> Vec<[u8; 3]> {
-    let to_u8 = |c: Rgb| c.map(|v| (v * brightness).round().clamp(0.0, 255.0) as u8);
+    let to_u8 = |c: Rgb| dim(c, brightness);
     match combo.mid {
         Some(mid) => {
-            // The head runs low -> mid -> high with load; the first part of each
-            // comet keeps the head color, the rest fades to the middle color.
-            let head = if level < 0.5 { mix(combo.low, mid, level * 2.0) } else { mix(mid, combo.high, (level - 0.5) * 2.0) };
+            // The first part of each comet keeps the head color, the rest fades
+            // to the middle color.
+            let head = head(level, combo);
             (0..n)
                 .map(|i| {
                     let d = mod1(i as f64 / PERIOD - pos);
@@ -121,10 +138,11 @@ pub struct Motion {
 }
 
 impl Motion {
-    pub fn step(&mut self, target: f64, dt: f64) {
+    /// `scale`: the Speed setting (1 = as on the page).
+    pub fn step(&mut self, target: f64, dt: f64, scale: f64) {
         let dt = dt.clamp(0.0, 0.1);
         self.level += (target - self.level) * (dt * 2.0).min(1.0);
-        self.pos = mod1(self.pos + speed(self.level) * dt);
+        self.pos = mod1(self.pos + speed(self.level) * scale * dt);
     }
 }
 
@@ -147,15 +165,19 @@ pub fn chosen_zones(controller: &Controller, wanted: &str) -> Vec<bool> {
 
 /// The whole controller's colors for one frame: chosen zones get the effect
 /// (each zone from its own first LED, like each header on its own), the rest
-/// keep what OpenRGB had.
+/// keep what OpenRGB had. A zone of one LED (the board's own light, a 12 V RGB
+/// header) can't show a comet, and pulsing it would flash the whole thing at
+/// every pass: it glows steadily in the head color instead.
 pub fn board_frame(controller: &Controller, chosen: &[bool], motion: &Motion, combo: &Combo, brightness: f64) -> Vec<[u8; 3]> {
     let mut out = Vec::with_capacity(controller.led_count());
     for (i, zone) in controller.zones.iter().enumerate() {
         let start = out.len();
-        if chosen.get(i).copied().unwrap_or(false) {
-            out.extend(frame(zone.leds as usize, motion.pos, motion.level, combo, brightness));
-        } else {
+        if !chosen.get(i).copied().unwrap_or(false) {
             out.extend((start..start + zone.leds as usize).map(|at| controller.colors.get(at).copied().unwrap_or([0, 0, 0])));
+        } else if zone.kind == ZONE_SINGLE || zone.leds <= 1 {
+            out.extend(std::iter::repeat_n(dim(head(motion.level, combo), brightness), zone.leds as usize));
+        } else {
+            out.extend(frame(zone.leds as usize, motion.pos, motion.level, combo, brightness));
         }
     }
     out
@@ -215,6 +237,17 @@ struct Target {
     settings: Settings,
 }
 
+/// Another program driving the same LEDs, by its command line: the two would
+/// fight and the fans flash. cpu_rgb.py is the one this replaces.
+pub fn rival(cmd: &[OsString]) -> bool {
+    cmd.iter().any(|arg| arg.to_string_lossy().to_lowercase().replace('\\', "/").ends_with("cpu_rgb.py"))
+}
+
+fn find_rival(system: &mut System) -> Option<String> {
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cmd(UpdateKind::OnlyIfNotSet));
+    system.processes().values().find(|p| rival(p.cmd())).map(|p| format!("cpu_rgb.py (process {})", p.pid()))
+}
+
 fn run(shared: Arc<Mutex<Shared>>, addr: &str) {
     let mut client: Option<Client> = None;
     let mut target: Option<Target> = None;
@@ -223,6 +256,9 @@ fn run(shared: Arc<Mutex<Shared>>, addr: &str) {
     let mut motion = Motion::default();
     let mut last = Instant::now();
     let mut said = String::new();
+    let mut system = System::new();
+    let mut rival_at = Instant::now();
+    let mut rival_seen: Option<String> = None;
 
     loop {
         let started = Instant::now();
@@ -248,6 +284,17 @@ fn run(shared: Arc<Mutex<Shared>>, addr: &str) {
                 target = None;
             }
             note(false, "off".into(), &mut said);
+            std::thread::sleep(Duration::from_millis(250));
+            continue;
+        }
+
+        if rival_at <= Instant::now() {
+            rival_at = Instant::now() + RETRY;
+            rival_seen = find_rival(&mut system);
+        }
+        if let Some(other) = &rival_seen {
+            // Leave the fans to it rather than both flashing them.
+            note(false, format!("paused: {other} is lighting the fans too, and the two would flash. Stop it (Stop-Process -Name pythonw) and remove it from startup."), &mut said);
             std::thread::sleep(Duration::from_millis(250));
             continue;
         }
@@ -306,7 +353,7 @@ fn run(shared: Arc<Mutex<Shared>>, addr: &str) {
         }
 
         let now = Instant::now();
-        motion.step(effect_level(cpu), now.duration_since(last).as_secs_f64());
+        motion.step(effect_level(cpu), now.duration_since(last).as_secs_f64(), settings.speed as f64 / 100.0);
         last = now;
         if let Some(t) = &target {
             let colors = board_frame(&t.controller, &t.chosen, &motion, combo(settings.combo), settings.brightness as f64 / 100.0);
@@ -396,13 +443,18 @@ mod tests {
     #[test]
     fn speed_glides_instead_of_jumping() {
         let mut m = Motion::default();
-        m.step(1.0, 0.033);
+        m.step(1.0, 0.033, 1.0);
         assert!(m.level > 0.0 && m.level < 0.1, "{}", m.level);
         for _ in 0..200 {
-            m.step(1.0, 0.033);
+            m.step(1.0, 0.033, 1.0);
         }
         assert!(m.level > 0.99);
         assert!((0.0..1.0).contains(&m.pos));
+        // Speed 50 %: half as far per frame.
+        let (mut full, mut half) = (Motion { level: 0.3, pos: 0.0 }, Motion { level: 0.3, pos: 0.0 });
+        full.step(0.3, 0.05, 1.0);
+        half.step(0.3, 0.05, 0.5);
+        assert!((half.pos * 2.0 - full.pos).abs() < 1e-9);
     }
 
     fn board() -> Controller {
@@ -439,6 +491,25 @@ mod tests {
         assert_eq!(colors[0], [0, 70, 255]); // ARGB_V2_1 from its own first LED
         assert_eq!(colors[3], [9, 9, 9]); // the zone left alone keeps its color
         assert_eq!(colors[4], [0, 70, 255]); // ARGB_V2_2 from its own first LED
+    }
+
+    #[test]
+    fn a_single_led_zone_glows_steadily() {
+        let b = board();
+        let at = |pos: f64| board_frame(&b, &[true, true, true], &Motion { level: 0.0, pos }, combo(12), 1.0)[3];
+        assert_eq!(at(0.0), [0, 70, 255]);
+        assert_eq!(at(0.5), [0, 70, 255], "no pulse as the comets pass");
+        assert_eq!(at(0.9), [0, 70, 255]);
+        assert_eq!(board_frame(&b, &[true, true, true], &Motion { level: 1.0, pos: 0.3 }, combo(12), 1.0)[3], [220, 0, 255]);
+    }
+
+    #[test]
+    fn spots_cpu_rgb_py() {
+        let cmd = |args: &[&str]| args.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(rival(&cmd(&["C:\\Python312\\pythonw.exe", "C:\\Users\\linh\\cpu_rgb.py"])));
+        assert!(rival(&cmd(&["py", "CPU_RGB.PY", "4"])));
+        assert!(!rival(&cmd(&["pythonw.exe", "C:\\tools\\other.py"])));
+        assert!(!rival(&cmd(&["notepad.exe", "cpu_rgb.py.txt"])));
     }
 
     /// Every packet the pretend OpenRGB got: (packet id, body).

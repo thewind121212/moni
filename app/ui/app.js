@@ -55,6 +55,7 @@ function readLights() {
     enabled: $("lights-enabled").checked,
     combo: Number($("lights-combo").value),
     brightness: Number($("lights-brightness").value),
+    speed: Number($("lights-speed").value),
     leds_per_zone: Number.isInteger(leds) && leds >= 0 ? leds : config.lights.leds_per_zone,
     device: $("lights-device").value.trim(),
     zones: $("lights-zones").value.trim(),
@@ -67,6 +68,7 @@ function fillLights() {
   $("lights-enabled").checked = l.enabled;
   $("lights-combo").value = String(l.combo);
   $("lights-brightness").value = String(l.brightness);
+  $("lights-speed").value = String(l.speed);
   $("lights-leds").value = String(l.leds_per_zone);
   $("lights-device").value = l.device;
   $("lights-zones").value = l.zones;
@@ -78,6 +80,7 @@ function showLights() {
   const stops = [low, mid, high].filter(Boolean).map((c) => `rgb(${c.join(",")})`);
   $("lights-preview").style.background = `linear-gradient(90deg, ${stops.join(", ")})`;
   $("lights-brightness-value").textContent = `${$("lights-brightness").value} %`;
+  $("lights-speed-value").textContent = `${$("lights-speed").value} %`;
 }
 
 function renderLights(status) {
@@ -385,10 +388,10 @@ async function start() {
     radio.addEventListener("change", save);
   }
   $("wifi-target").addEventListener("change", save);
-  for (const id of ["lights-enabled", "lights-combo", "lights-brightness", "lights-leds", "lights-device", "lights-zones"]) {
+  for (const id of ["lights-enabled", "lights-combo", "lights-brightness", "lights-speed", "lights-leds", "lights-device", "lights-zones"]) {
     $(id).addEventListener("change", save);
   }
-  for (const id of ["lights-combo", "lights-brightness"]) $(id).addEventListener("input", showLights);
+  for (const id of ["lights-combo", "lights-brightness", "lights-speed"]) $(id).addEventListener("input", showLights);
   for (const id of ["lights-leds", "lights-device", "lights-zones"]) {
     $(id).addEventListener("keydown", (e) => e.key === "Enter" && save());
   }

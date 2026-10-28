@@ -56,9 +56,11 @@ no Python and no separate LibreHardwareMonitor window:
   it, starts with Windows. It needs OpenRGB open with **SDK Server** started
   (port 6742); start OpenRGB at sign-in with `--server --startminimized`.
   Until OpenRGB answers, Moni tries again every 5 s and the app says why.
-  Addressable zones are sized to *LEDs per header* (120; OpenRGB guesses 10).
-  Stop `cpu_rgb.py` and OpenRGB's own effects first, or they fight and
-  flicker. Code: `app/core/src/lights.rs` (effect) and `openrgb.rs` (SDK
+  Addressable zones are sized to *LEDs per header* (120; OpenRGB guesses 10);
+  a one-LED zone (the board's own light, a 12 V header) glows steadily in the
+  head color. *Speed* scales the comets (25-200 %). While `cpu_rgb.py` runs,
+  Moni pauses and says so (the two would fight and flash); stop OpenRGB's
+  own effects too. Code: `app/core/src/lights.rs` (effect) and `openrgb.rs` (SDK
   client).
 
 Get the installer from the latest **Windows app** workflow run (Actions tab →

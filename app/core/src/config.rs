@@ -58,6 +58,8 @@ pub struct Lights {
     pub combo: u8,
     /// 0-100 %.
     pub brightness: u8,
+    /// How fast the comets run, 25-200 % of the page's speeds.
+    pub speed: u8,
     /// Part of the OpenRGB device name; empty = the motherboard.
     pub device: String,
     /// Comma-separated zone names to light; empty = every zone.
@@ -70,7 +72,7 @@ pub struct Lights {
 
 impl Default for Lights {
     fn default() -> Self {
-        Self { enabled: false, combo: 12, brightness: 100, device: String::new(), zones: String::new(), leds_per_zone: 120 }
+        Self { enabled: false, combo: 12, brightness: 100, speed: 100, device: String::new(), zones: String::new(), leds_per_zone: 120 }
     }
 }
 
@@ -122,6 +124,7 @@ impl Config {
         let lights = &mut self.lights;
         lights.combo = lights.combo.clamp(1, crate::lights::COMBOS.len() as u8);
         lights.brightness = lights.brightness.min(100);
+        lights.speed = lights.speed.clamp(25, 200);
         lights.device = lights.device.trim().to_string();
         lights.zones = lights.zones.trim().to_string();
         lights.leds_per_zone = lights.leds_per_zone.min(1024);
@@ -153,10 +156,10 @@ mod tests {
 
     #[test]
     fn lights_settings_are_kept_in_range() {
-        let config: Config = serde_json::from_str(r#"{"lights":{"enabled":true,"combo":40,"brightness":250,"zones":" ARGB_V2_1 "}}"#).unwrap();
+        let config: Config = serde_json::from_str(r#"{"lights":{"enabled":true,"combo":40,"brightness":250,"speed":3,"zones":" ARGB_V2_1 "}}"#).unwrap();
         let lights = config.sanitized().lights;
         assert!(lights.enabled);
-        assert_eq!((lights.combo, lights.brightness, lights.leds_per_zone), (12, 100, 120));
+        assert_eq!((lights.combo, lights.brightness, lights.speed, lights.leds_per_zone), (12, 100, 25, 120));
         assert_eq!(lights.zones, "ARGB_V2_1");
     }
 }
