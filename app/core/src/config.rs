@@ -45,6 +45,33 @@ pub struct Config {
     /// Shared with moni-relay (MONI_PC_KEY) so the home page can turn this PC
     /// off; empty = remote shutdown off. See [`crate::control`].
     pub control_key: String,
+    /// The fans' ARGB lights through OpenRGB. See [`crate::lights`].
+    pub lights: Lights,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Lights {
+    /// Off until switched on, so it never fights another RGB program.
+    pub enabled: bool,
+    /// 1-12, see [`crate::lights::COMBOS`]; 12 = Blue & Purple.
+    pub combo: u8,
+    /// 0-100 %.
+    pub brightness: u8,
+    /// Part of the OpenRGB device name; empty = the motherboard.
+    pub device: String,
+    /// Comma-separated zone names to light; empty = every zone.
+    pub zones: String,
+    /// Addressable zones are resized to this many LEDs (OpenRGB guesses 10
+    /// for an ARGB header; Jonsbo ZA fans have 70+ on one cable). 0 = leave
+    /// OpenRGB's sizes alone.
+    pub leds_per_zone: u32,
+}
+
+impl Default for Lights {
+    fn default() -> Self {
+        Self { enabled: false, combo: 12, brightness: 100, device: String::new(), zones: String::new(), leds_per_zone: 120 }
+    }
 }
 
 impl Default for Config {
@@ -60,6 +87,7 @@ impl Default for Config {
             interval_ms: 1000,
             baud: 115_200,
             control_key: String::new(),
+            lights: Lights::default(),
         }
     }
 }
@@ -91,6 +119,12 @@ impl Config {
         self.mobo_sensor = self.mobo_sensor.trim().to_string();
         self.ssd_sensor = self.ssd_sensor.trim().to_string();
         self.control_key = self.control_key.trim().to_string();
+        let lights = &mut self.lights;
+        lights.combo = lights.combo.clamp(1, crate::lights::COMBOS.len() as u8);
+        lights.brightness = lights.brightness.min(100);
+        lights.device = lights.device.trim().to_string();
+        lights.zones = lights.zones.trim().to_string();
+        lights.leds_per_zone = lights.leds_per_zone.min(1024);
         self
     }
 
@@ -114,5 +148,15 @@ mod tests {
         assert_eq!(config.transport, Transport::Wifi);
         assert!(config.enabled);
         assert_eq!(config.interval_ms, 1000);
+        assert_eq!(config.lights, Lights::default());
+    }
+
+    #[test]
+    fn lights_settings_are_kept_in_range() {
+        let config: Config = serde_json::from_str(r#"{"lights":{"enabled":true,"combo":40,"brightness":250,"zones":" ARGB_V2_1 "}}"#).unwrap();
+        let lights = config.sanitized().lights;
+        assert!(lights.enabled);
+        assert_eq!((lights.combo, lights.brightness, lights.leds_per_zone), (12, 100, 120));
+        assert_eq!(lights.zones, "ARGB_V2_1");
     }
 }

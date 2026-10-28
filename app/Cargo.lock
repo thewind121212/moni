@@ -2382,7 +2382,7 @@ dependencies = [
 
 [[package]]
 name = "moni-app"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "espflash",
  "moni-core",
@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "moni-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "hmac",
  "if-addrs",
@@ -2412,7 +2412,7 @@ dependencies = [
 
 [[package]]
 name = "moni-service"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "moni-core",
  "serde",

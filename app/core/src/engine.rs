@@ -4,6 +4,7 @@
 use crate::config::{Config, Transport};
 use crate::control;
 use crate::hardware::{self, Choices, SensorFeed};
+use crate::lights::Lights;
 use crate::paths;
 use crate::sampler::{Payload, Sampler};
 use crate::transport::{list_ports, PortInfo, SerialLink, UdpLink};
@@ -35,6 +36,9 @@ pub struct Status {
     pub restart_note: String,
     pub control_on: bool,
     pub control_note: String,
+    /// The fan lights: lighting now, and what they light or why not.
+    pub lights_on: bool,
+    pub lights_note: String,
     pub ports: Vec<PortInfo>,
     pub sample: Option<Payload>,
 }
@@ -67,6 +71,7 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
     let mut restart_note = String::new();
     let control_key = Arc::new(Mutex::new(config.control_key.clone()));
     let control_note = (!options.preview).then(|| control::start(control_key.clone()));
+    let lights = (!options.preview).then(|| Lights::start(config.lights.clone()));
     paths::log(&format!("moni-service {VERSION} started ({:?})", config.transport));
     if let Some(note) = &control_note {
         paths::log(&format!("remote shutdown: {}", note.lock().unwrap()));
@@ -85,6 +90,9 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
                     serial.close("settings changed");
                 }
                 *control_key.lock().unwrap() = fresh.control_key.clone();
+                if let Some(lights) = &lights {
+                    lights.configure(&fresh.lights);
+                }
                 config = fresh;
             }
         }
@@ -94,6 +102,9 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
             mobo: &config.mobo_sensor,
             ssd: &config.ssd_sensor,
         });
+        if let Some(lights) = &lights {
+            lights.sample(payload.cpu);
+        }
         let line = serde_json::to_string(&payload).unwrap_or_default();
         let control_on = control_note.is_some() && control::key_ok(&config.control_key);
         let mut hello = sampler.hello();
@@ -132,6 +143,7 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
                 ports = list_ports();
             }
             let sensor_error = sampler.sensors.as_ref().and_then(|feed| feed.error());
+            let (lights_on, lights_note) = lights.as_ref().map(|l| l.status()).unwrap_or_default();
             let status = Status {
                 updated: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
                 version: VERSION.into(),
@@ -149,6 +161,8 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
                 restart_note: restart_note.clone(),
                 control_on,
                 control_note: control_note.as_ref().map(|n| n.lock().unwrap().clone()).unwrap_or_default(),
+                lights_on,
+                lights_note,
                 ports: ports.clone(),
                 sample: Some(payload),
             };
@@ -179,6 +193,9 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
     // stuck in a USB-serial or sensor-driver call can hold up a shutdown.
     let stopping = Instant::now();
     serial.close("service stopping");
+    if let Some(lights) = &lights {
+        lights.stop();
+    }
     if let Some(feed) = &sampler.sensors {
         paths::log(&format!("stopping: sensor helper {}", feed.stop()));
     }

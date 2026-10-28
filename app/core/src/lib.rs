@@ -6,6 +6,8 @@ pub mod control;
 pub mod engine;
 pub mod gpu;
 pub mod hardware;
+pub mod lights;
+pub mod openrgb;
 pub mod paths;
 pub mod sampler;
 pub mod transport;

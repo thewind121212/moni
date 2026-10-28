@@ -26,7 +26,66 @@ function readForm() {
     ssd_sensor: $("ssd-sensor").value,
     interval_ms: Number($("interval").value),
     control_key: $("control-key").value.trim(),
+    lights: readLights(),
   };
+}
+
+// ---------- fan lights ----------
+
+// The same 12 combos as the service (core/src/lights.rs COMBOS): low, middle, high load.
+const COMBOS = [
+  ["Traffic Light", [0, 255, 0], [255, 255, 0], [255, 0, 0]],
+  ["Ice to Fire", [0, 120, 255], [255, 255, 255], [255, 40, 0]],
+  ["Ocean", [0, 255, 200], [0, 120, 255], [0, 0, 255]],
+  ["Cyberpunk", [0, 255, 255], [180, 0, 255], [255, 0, 120]],
+  ["Lava", [255, 120, 0], [255, 40, 0], [255, 0, 0]],
+  ["Galaxy", [60, 0, 255], [160, 0, 255], [255, 0, 255]],
+  ["Toxic", [0, 255, 0], [180, 255, 0], [255, 255, 0]],
+  ["Sunset", [255, 160, 0], [255, 0, 100], [120, 0, 255]],
+  ["Frost", [40, 200, 255], [0, 90, 255], [0, 20, 255]],
+  ["Matrix to Alarm", [0, 120, 0], [0, 255, 80], [255, 0, 0]],
+  ["Fire & Ice", [0, 140, 255], null, [255, 50, 0]],
+  ["Blue & Purple", [0, 70, 255], [140, 0, 255], [220, 0, 255]],
+];
+
+function readLights() {
+  const leds = Number($("lights-leds").value.trim());
+  return {
+    ...config.lights,
+    enabled: $("lights-enabled").checked,
+    combo: Number($("lights-combo").value),
+    brightness: Number($("lights-brightness").value),
+    leds_per_zone: Number.isInteger(leds) && leds >= 0 ? leds : config.lights.leds_per_zone,
+    device: $("lights-device").value.trim(),
+    zones: $("lights-zones").value.trim(),
+  };
+}
+
+function fillLights() {
+  const l = config.lights;
+  $("lights-combo").replaceChildren(...COMBOS.map(([name], i) => new Option(`${i + 1}. ${name}`, String(i + 1))));
+  $("lights-enabled").checked = l.enabled;
+  $("lights-combo").value = String(l.combo);
+  $("lights-brightness").value = String(l.brightness);
+  $("lights-leds").value = String(l.leds_per_zone);
+  $("lights-device").value = l.device;
+  $("lights-zones").value = l.zones;
+  showLights();
+}
+
+function showLights() {
+  const [, low, mid, high] = COMBOS[Number($("lights-combo").value) - 1] ?? COMBOS[11];
+  const stops = [low, mid, high].filter(Boolean).map((c) => `rgb(${c.join(",")})`);
+  $("lights-preview").style.background = `linear-gradient(90deg, ${stops.join(", ")})`;
+  $("lights-brightness-value").textContent = `${$("lights-brightness").value} %`;
+}
+
+function renderLights(status) {
+  const enabled = config?.lights.enabled;
+  if (status.lights_on) pill("pill-lights", "On", "good");
+  else if (enabled) pill("pill-lights", "Waiting", "warn");
+  else pill("pill-lights", "Off");
+  $("lights-note").textContent = enabled && status.lights_note !== "off" ? status.lights_note : "";
 }
 
 function fillForm() {
@@ -44,6 +103,7 @@ function fillForm() {
   if (![...$("interval").options].some((o) => o.selected)) {
     $("interval").add(new Option(`Every ${config.interval_ms} ms`, String(config.interval_ms), true, true));
   }
+  fillLights();
   syncVisibility();
 }
 
@@ -63,6 +123,7 @@ async function save() {
   if (wifiMode === "fixed" && next.wifi_target === "") return; // wait for an address
   try {
     config = await invoke("save_config", { config: next });
+    $("lights-leds").value = String(config.lights.leds_per_zone); // (a bad number goes back to the saved one)
     $("settings-error").hidden = true;
     $("saved").hidden = false;
     clearTimeout(savedTimer);
@@ -213,6 +274,7 @@ function renderStatus(view) {
   updatePorts(status.ports ?? []);
   renderDiag(status);
   renderRestart(status);
+  renderLights(status);
 }
 
 // "1792290000 restarted on COM3" -> shown for a minute after the click
@@ -233,6 +295,7 @@ function renderDiag(status) {
     ["GPU", status.gpu_note ? `${status.gpu_name} (${status.gpu_note})` : status.gpu_name],
     ["Sensors", status.sensors_ok ? "LibreHardwareMonitor OK" : status.sensors_note || "–"],
     ["Turn off", status.control_on ? status.control_note : "off (no key)"],
+    ["Fan lights", status.lights_note || "–"],
   ];
   $("diag").replaceChildren(
     ...rows.flatMap(([k, v]) => {
@@ -322,6 +385,13 @@ async function start() {
     radio.addEventListener("change", save);
   }
   $("wifi-target").addEventListener("change", save);
+  for (const id of ["lights-enabled", "lights-combo", "lights-brightness", "lights-leds", "lights-device", "lights-zones"]) {
+    $(id).addEventListener("change", save);
+  }
+  for (const id of ["lights-combo", "lights-brightness"]) $(id).addEventListener("input", showLights);
+  for (const id of ["lights-leds", "lights-device", "lights-zones"]) {
+    $(id).addEventListener("keydown", (e) => e.key === "Enter" && save());
+  }
   $("wifi-target").addEventListener("keydown", (e) => e.key === "Enter" && save());
   $("autostart").addEventListener("change", async (e) => {
     try {
