@@ -6,7 +6,7 @@
 #   sudo ufw allow from 10.10.0.0/24 to any port 5005 proto udp     # PC broadcasts
 services:
   moni-relay:
-    image: python:3.13-alpine
+    image: python:3.15-alpine3.24
     container_name: moni-relay
     restart: unless-stopped
     network_mode: host
@@ -24,4 +24,4 @@ services:
       - MONI_WAKE_BROADCAST=10.10.0.255,255.255.255.255
     volumes:
       - ./moni_relay.py:/app/moni_relay.py:ro
-    command: ["python", "-I", "/app/moni_relay.py"]
+    command: [ "python", "-I", "/app/moni_relay.py" ]
