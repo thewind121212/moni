@@ -72,6 +72,13 @@ pub struct Lights {
     pub mode: LightMode,
     /// Load mode: 1-12, see [`crate::lights::COMBOS`]; 12 = Blue & Purple.
     pub combo: u8,
+    /// Load mode: the comets follow CPU load (speed and color). Off = Fixed:
+    /// they run at Speed (100 % = one comet a second) in the color at
+    /// `comet_level`, whatever the CPU does.
+    pub comet_load: bool,
+    /// Fixed comets: where their head color sits on the combo, 0 (its idle
+    /// color) to 100 (its full-load color).
+    pub comet_level: u8,
     /// Static mode: "#rrggbb".
     pub color: String,
     /// Rainbow mode: the colors it runs through ("#rrggbb", up to 8, looping
@@ -103,6 +110,8 @@ impl Default for Lights {
             enabled: false,
             mode: LightMode::Load,
             combo: 12,
+            comet_load: true,
+            comet_level: 50,
             color: "#0046ff".into(),
             rainbow: Vec::new(),
             rainbow_length: 60,
@@ -168,6 +177,7 @@ impl Config {
         lights.rainbow = lights.rainbow.iter().filter_map(|c| crate::lights::parse_hex(c)).map(crate::lights::to_hex).take(RAINBOW_COLORS_MAX).collect();
         lights.rainbow_length = lights.rainbow_length.clamp(6, 240);
         lights.brightness = lights.brightness.min(100);
+        lights.comet_level = lights.comet_level.min(100);
         lights.speed = lights.speed.clamp(25, 200);
         lights.device = lights.device.trim().to_string();
         lights.zones = lights.zones.trim().to_string();
@@ -196,6 +206,7 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.interval_ms, 1000);
         assert_eq!(config.lights, Lights::default());
+        assert!(config.lights.comet_load, "comets follow the CPU unless set to Fixed");
     }
 
     #[test]

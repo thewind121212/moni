@@ -30,6 +30,9 @@ const SPEED_MIN: f64 = 0.22;
 const PERIOD: f64 = 18.0;
 /// How far the rainbow runs at Speed 100 %, in LEDs a second.
 const RAINBOW_RATE: f64 = 24.0;
+/// Fixed comets at Speed 100 %: one pass a second (about what CPU load mode
+/// gives at 15-20 % load).
+pub const FIXED_RATE: f64 = 1.0;
 const FRAME: Duration = Duration::from_millis(33);
 const RETRY: Duration = Duration::from_secs(5);
 /// How often the device list is read again (zones resized in OpenRGB, a
@@ -226,6 +229,14 @@ impl Motion {
         let dt = dt.clamp(0.0, 0.1);
         self.level += (target - self.level) * (dt * 2.0).min(1.0);
         self.pos = mod1(self.pos + speed(self.level) * scale * dt);
+    }
+
+    /// Fixed comets: glide to `target` like the CPU level does, and run at
+    /// `per_second` comet passes a second whatever the level.
+    pub fn fixed(&mut self, target: f64, dt: f64, per_second: f64) {
+        let dt = dt.clamp(0.0, 0.1);
+        self.level += (target - self.level) * (dt * 2.0).min(1.0);
+        self.pos = mod1(self.pos + per_second * dt);
     }
 
     /// The rainbow runs RAINBOW_RATE LEDs a second at `scale` 1; with `load`,
@@ -579,7 +590,11 @@ fn run(shared: Arc<Mutex<Shared>>, mut source: Source) {
         let now = Instant::now();
         let (dt, scale) = (now.duration_since(last).as_secs_f64(), settings.speed as f64 / 100.0);
         let effect = Effect::of(&settings);
-        motion.step(effect_level(cpu), dt, scale);
+        if settings.mode == LightMode::Load && !settings.comet_load {
+            motion.fixed(settings.comet_level as f64 / 100.0, dt, FIXED_RATE * scale);
+        } else {
+            motion.step(effect_level(cpu), dt, scale);
+        }
         if let Effect::Rainbow { length, .. } = &effect {
             motion.roll(dt, scale, *length, settings.rainbow_load);
         }
@@ -720,6 +735,18 @@ mod tests {
         assert_eq!(colors[0], [0, 70, 255]); // ARGB_V2_1 from its own first LED
         assert_eq!(colors[3], [9, 9, 9]); // the zone left alone keeps its color
         assert_eq!(colors[4], [0, 70, 255]); // ARGB_V2_2 from its own first LED
+    }
+
+    #[test]
+    fn fixed_comets_ignore_the_cpu() {
+        let mut m = Motion::default();
+        for _ in 0..300 {
+            m.fixed(0.25, 0.033, FIXED_RATE * 0.5);
+        }
+        assert!((m.level - 0.25).abs() < 1e-3, "the chosen color: {}", m.level);
+        let before = m.pos;
+        m.fixed(0.25, 0.05, FIXED_RATE * 0.5);
+        assert!((mod1(m.pos - before) - 0.025).abs() < 1e-9, "half a pass a second at Speed 50 %");
     }
 
     #[test]

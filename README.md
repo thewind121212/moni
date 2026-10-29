@@ -54,7 +54,9 @@ no Python and no separate LibreHardwareMonitor window:
   starts with Windows. Three effects, with *Brightness*:
   - **CPU load** (the default): more load gives faster comets and a head
     further along the chosen colors (12 combos, default Blue & Purple;
-    *Speed* 25-200 %).
+    *Speed* 25-200 %). Untick *Follow CPU load* for **Fixed** comets: they
+    run at *Speed* (100 % = one comet a second) in a *Color* picked on the
+    combo's gradient, whatever the CPU does.
   - **Static:** one still color, from 11 quick picks or any color.
   - **Rainbow:** a wave running along each header, through the full spectrum
     or up to 8 colors of your own (blended in a loop; any combo's colors fill

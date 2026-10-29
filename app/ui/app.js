@@ -57,6 +57,14 @@ const PREVIEW_LEDS = 120; // the preview bar stands for this many LEDs
 const hex = (c) => "#" + c.map((v) => v.toString(16).padStart(2, "0")).join("");
 const comboColors = ([, low, mid, high]) => [low, mid, high].filter(Boolean).map(hex);
 
+// The comet head's color at t (0-1) on a combo's colors, as the service picks
+// it (core/src/lights.rs head): low -> mid -> high, or low -> high.
+function comboAt(colors, t) {
+  const rgb = colors.map((c) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16)));
+  const [a, b, f] = rgb.length === 3 ? (t < 0.5 ? [rgb[0], rgb[1], t * 2] : [rgb[1], rgb[2], (t - 0.5) * 2]) : [rgb[0], rgb[1], t];
+  return `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * f)).join(",")})`;
+}
+
 // Rainbow: the user's own colors, kept while "Full rainbow" is picked so
 // switching back finds them again.
 let ownColors = ["#ff0080", "#8c00ff", "#00c8ff"];
@@ -71,6 +79,8 @@ function readLights() {
     enabled: $("lights-enabled").checked,
     mode: lightsMode(),
     combo: Number($("lights-combo").value),
+    comet_load: $("lights-comet-load").checked,
+    comet_level: Number($("lights-comet-level").value),
     color: $("lights-color").value,
     rainbow: paletteOwn() ? ownColors.slice(0, RAINBOW_MAX) : [],
     rainbow_length: Number($("lights-length").value),
@@ -90,6 +100,8 @@ function fillLights() {
   $("lights-enabled").checked = l.enabled;
   for (const radio of document.querySelectorAll('input[name="lights-mode"]')) radio.checked = radio.value === l.mode;
   $("lights-combo").value = String(l.combo);
+  $("lights-comet-load").checked = l.comet_load;
+  $("lights-comet-level").value = String(l.comet_level);
   $("lights-color").value = l.color;
   if (l.rainbow.length) ownColors = [...l.rainbow];
   for (const radio of document.querySelectorAll('input[name="lights-palette"]')) {
@@ -216,13 +228,27 @@ function showLights(redraw = true) {
     preview.style.backgroundSize = `${(Number($("lights-length").value) / PREVIEW_LEDS) * 100}% 100%`;
     preview.style.backgroundRepeat = "repeat-x";
   } else {
-    preview.style.background = `linear-gradient(90deg, ${comboColors(COMBOS[Number($("lights-combo").value) - 1] ?? COMBOS[11]).join(", ")})`;
+    const colors = comboColors(COMBOS[Number($("lights-combo").value) - 1] ?? COMBOS[11]);
+    const gradient = `linear-gradient(90deg, ${colors.join(", ")})`;
+    const fixed = !$("lights-comet-load").checked;
+    // Fixed: the preview shows the one color the comets run in.
+    preview.style.background = fixed ? comboAt(colors, Number($("lights-comet-level").value) / 100) : gradient;
+    $("lights-comet-level").style.background = gradient;
+    $("lights-level-row").hidden = !fixed;
+    $("lights-comet-hint").textContent = fixed
+      ? "Off: the comets run at the Speed below, in the Color you pick, whatever the CPU does."
+      : "Comets run faster and hotter with CPU load.";
   }
   $("lights-brightness-value").textContent = `${$("lights-brightness").value} %`;
   $("lights-speed-value").textContent = `${$("lights-speed").value} %`;
   $("lights-length-value").textContent = `${$("lights-length").value} LEDs`;
+  const fixedComets = mode === "load" && !$("lights-comet-load").checked;
   $("lights-speed-hint").textContent =
-    mode === "rainbow" ? `${Math.round((RAINBOW_RATE * Number($("lights-speed").value)) / 100)} LEDs a second.` : "100 % is cpu_rgb.py's speed. Lower is calmer.";
+    mode === "rainbow"
+      ? `${Math.round((RAINBOW_RATE * Number($("lights-speed").value)) / 100)} LEDs a second.`
+      : fixedComets
+        ? `${(Number($("lights-speed").value) / 100).toFixed(2)} comets a second.`
+        : "100 % is cpu_rgb.py's speed. Lower is calmer.";
   if (mode === "rainbow") runPreview();
 }
 
@@ -554,10 +580,11 @@ async function start() {
     radio.addEventListener("change", save);
   }
   $("wifi-target").addEventListener("change", save);
-  for (const id of ["lights-enabled", "lights-combo", "lights-brightness", "lights-speed", "lights-length", "lights-reverse", "lights-rainbow-load", "lights-leds", "lights-device", "lights-zones"]) {
+  for (const id of ["lights-enabled", "lights-combo", "lights-brightness", "lights-speed", "lights-length", "lights-reverse", "lights-rainbow-load", "lights-comet-load", "lights-comet-level", "lights-leds", "lights-device", "lights-zones"]) {
     $(id).addEventListener("change", save);
   }
-  for (const id of ["lights-combo", "lights-brightness", "lights-speed", "lights-length"]) $(id).addEventListener("input", () => showLights(false));
+  for (const id of ["lights-combo", "lights-brightness", "lights-speed", "lights-length", "lights-comet-level"]) $(id).addEventListener("input", () => showLights(false));
+  $("lights-comet-load").addEventListener("change", () => showLights(false));
   for (const radio of document.querySelectorAll('input[name="lights-mode"], input[name="lights-palette"]')) {
     radio.addEventListener("change", changed);
   }

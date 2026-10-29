@@ -224,3 +224,6 @@ details.row > .row:first-of-type { border-top: 0; }
   border-color: transparent;
   background: var(--g);
 }
+/* the fixed comets' Color: a slider over the combo's colors */
+input[type="range"].level-slider { height: 10px; border-radius: 999px; appearance: none; -webkit-appearance: none; }
+input[type="range"].level-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 2px solid var(--border); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35); }

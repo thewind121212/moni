@@ -140,7 +140,20 @@
           <div class="row stack" data-mode="load">
             <strong>Colors</strong>
             <select id="lights-combo"></select>
-            <small>Comets run faster and hotter with CPU load.</small>
+          </div>
+
+          <label class="row toggle" data-mode="load">
+            <span>
+              <strong>Follow CPU load</strong>
+              <small id="lights-comet-hint">Comets run faster and hotter with CPU load.</small>
+            </span>
+            <input type="checkbox" id="lights-comet-load">
+          </label>
+
+          <div class="row stack" data-mode="load" id="lights-level-row">
+            <strong>Color</strong>
+            <input type="range" id="lights-comet-level" min="0" max="100" step="5" class="level-slider">
+            <small>Where the comets' color sits between the combo's idle and full-load colors.</small>
           </div>
 
           <div class="row stack" data-mode="static">
