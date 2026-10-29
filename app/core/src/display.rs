@@ -239,6 +239,7 @@ fn run(shared: Arc<Mutex<Shared>>) {
         };
         if !settings.enabled {
             port.close();
+            checked_at = None; // switched back on: look at once
             note(false, "off", &mut said);
             std::thread::sleep(Duration::from_millis(250));
             continue;
@@ -286,6 +287,7 @@ mod hid {
     use hidapi::{HidApi, HidDevice};
     use std::collections::HashSet;
     use std::ffi::CString;
+    use std::time::Instant;
 
     /// The display's maker uses 5131:2007 for this display and nearby IDs for
     /// its other boards: 2007 first, then the rest.
@@ -302,7 +304,13 @@ mod hid {
 
     #[derive(Default)]
     pub struct Port {
+        /// One HID context for the service, made without hidapi's look at
+        /// every HID device: that reads each one's name strings, and one slow
+        /// device (Bluetooth, a stuck one) held a reconnect up a whole minute.
+        api: Option<HidApi>,
         open: Option<Open>,
+        /// Where the display was last time: reopened straight away, no search.
+        known: Option<(CString, u16, u16)>,
         failures: u32,
         /// Collections that took no data: skipped until every one has failed.
         refused: HashSet<CString>,
@@ -322,43 +330,74 @@ mod hid {
             self.open.as_ref().map(|o| format!("{VID:04X}:{:04X}, usage page {}", o.pid, o.page)).unwrap_or_default()
         }
 
-        /// A display may show up as several HID collections (one per usage
-        /// page); only one takes the data. Tries them in turn, skipping the
-        /// ones that refused a write.
+        fn api(&mut self) -> Result<&mut HidApi, String> {
+            if self.api.is_none() {
+                HidApi::disable_device_discovery();
+                self.api = Some(HidApi::new().map_err(|e| format!("can't use USB HID ({e})"))?);
+            }
+            Ok(self.api.as_mut().expect("made above"))
+        }
+
         pub fn open(&mut self) {
-            let api = match HidApi::new() {
+            // The same display as before: open its path, no search.
+            if let Some((path, pid, page)) = self.known.clone() {
+                if !self.refused.contains(&path) {
+                    if let Ok(device) = self.api().and_then(|api| api.open_path(&path).map_err(|e| e.to_string())) {
+                        self.open = Some(Open { device, page, pid, path, proven: false });
+                        self.failures = 0;
+                        return;
+                    }
+                }
+            }
+            let started = Instant::now();
+            let api = match self.api() {
                 Ok(api) => api,
                 Err(e) => {
-                    self.note = format!("can't list USB devices ({e})");
+                    self.note = e;
                     return;
                 }
             };
+            // Only the maker's devices are looked at closely.
+            let _ = api.reset_devices();
+            if let Err(e) = api.add_devices(VID, 0) {
+                self.note = format!("can't list USB devices ({e})");
+                return;
+            }
             let mut found: Vec<_> = api
                 .device_list()
-                .filter(|d| d.vendor_id() == VID && (d.product_id() == PID || OTHER_PIDS.contains(&d.product_id())))
+                .filter(|d| d.product_id() == PID || OTHER_PIDS.contains(&d.product_id()))
+                .map(|d| (d.path().to_owned(), d.product_id(), d.usage_page(), d.interface_number()))
                 .collect();
-            found.sort_by_key(|d| d.product_id() != PID);
+            found.sort_by_key(|(_, pid, _, _)| *pid != PID);
+            let took = started.elapsed().as_millis();
+            if took > 2000 {
+                crate::paths::log(&format!("digital display: looking for it took {took} ms"));
+            }
             if found.is_empty() {
                 self.note = format!("not connected: no USB device {VID:04X}:{PID:04X} (plug it in, or check its USB header)");
                 return;
             }
-            if found.iter().all(|d| self.refused.contains(d.path())) {
+            if found.iter().all(|(path, ..)| self.refused.contains(path)) {
                 self.refused.clear(); // all tried: start over
             }
             let mut why = Vec::new();
-            let untried: Vec<_> = found.iter().filter(|d| !self.refused.contains(d.path())).collect();
-            for info in untried {
-                let what = format!("{VID:04X}:{:04X} page {}", info.product_id(), info.usage_page());
-                match info.open_device(&api) {
+            for (path, pid, page, interface) in found {
+                if self.refused.contains(&path) {
+                    continue;
+                }
+                let what = format!("{VID:04X}:{pid:04X} page {page}");
+                let opened = self.api().and_then(|api| api.open_path(&path).map_err(|e| e.to_string()));
+                match opened {
                     Ok(device) => {
-                        crate::paths::log(&format!("digital display: opened {what} (interface {})", info.interface_number()));
-                        self.open = Some(Open { device, page: info.usage_page(), pid: info.product_id(), path: info.path().to_owned(), proven: false });
+                        crate::paths::log(&format!("digital display: opened {what} (interface {interface}, {took} ms to find)"));
+                        self.known = Some((path.clone(), pid, page));
+                        self.open = Some(Open { device, page, pid, path, proven: false });
                         self.failures = 0;
                         return;
                     }
                     Err(e) => {
                         why.push(format!("{what}: {e}"));
-                        self.refused.insert(info.path().to_owned());
+                        self.refused.insert(path);
                     }
                 }
             }
@@ -387,6 +426,9 @@ mod hid {
                 Err(e) => {
                     if !open.proven {
                         self.refused.insert(open.path.clone());
+                        if self.known.as_ref().is_some_and(|(path, ..)| *path == open.path) {
+                            self.known = None;
+                        }
                     }
                     Err(format!("usage page {} took no data ({e})", open.page))
                 }
