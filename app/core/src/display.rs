@@ -249,7 +249,7 @@ fn run(shared: Arc<Mutex<Shared>>) {
             system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
             rival = system.processes().values().any(|p| is_jonsbo_app(&p.name().to_string_lossy()));
             if !port.is_open() {
-                port.open(VID, PID);
+                port.open();
             }
         }
         if rival {
@@ -266,10 +266,11 @@ fn run(shared: Arc<Mutex<Shared>>) {
         if let Some(p) = &sample {
             let data = packet(&Reading::from_sample(p, local_time()), &settings, page);
             match port.write(&data) {
-                Ok(()) => note(true, &format!("showing ({}, usage page {page})", if page == NEW_PAGE { "short layout" } else { "classic layout" }), &mut said),
+                Ok(()) => note(true, &format!("showing ({}, {})", port.describe(), if page == NEW_PAGE { "short layout" } else { "classic layout" }), &mut said),
                 Err(e) => {
                     port.close();
-                    note(false, &format!("lost the display ({e}); looking for it again"), &mut said);
+                    checked_at = None; // try the next collection now
+                    note(false, &format!("{e}; trying again"), &mut said);
                 }
             }
         }
@@ -281,26 +282,50 @@ fn run(shared: Arc<Mutex<Shared>>) {
 
 #[cfg(windows)]
 mod hid {
+    use super::{PID, VID};
     use hidapi::{HidApi, HidDevice};
+    use std::collections::HashSet;
+    use std::ffi::CString;
+
+    /// The display's maker uses 5131:2007 for this display and nearby IDs for
+    /// its other boards: 2007 first, then the rest.
+    const OTHER_PIDS: std::ops::RangeInclusive<u16> = 0x2000..=0x20ff;
+
+    struct Open {
+        device: HidDevice,
+        page: u16,
+        pid: u16,
+        path: CString,
+        /// A write has gone through on this collection.
+        proven: bool,
+    }
 
     #[derive(Default)]
     pub struct Port {
-        device: Option<(HidDevice, u16)>,
+        open: Option<Open>,
         failures: u32,
+        /// Collections that took no data: skipped until every one has failed.
+        refused: HashSet<CString>,
         pub note: String,
     }
 
     impl Port {
         pub fn is_open(&self) -> bool {
-            self.device.is_some()
+            self.open.is_some()
         }
 
         pub fn usage_page(&self) -> Option<u16> {
-            self.device.as_ref().map(|(_, page)| *page)
+            self.open.as_ref().map(|o| o.page)
         }
 
-        /// The first collection of the device, as JONSBO PC Monitor picks it.
-        pub fn open(&mut self, vid: u16, pid: u16) {
+        pub fn describe(&self) -> String {
+            self.open.as_ref().map(|o| format!("{VID:04X}:{:04X}, usage page {}", o.pid, o.page)).unwrap_or_default()
+        }
+
+        /// A display may show up as several HID collections (one per usage
+        /// page); only one takes the data. Tries them in turn, skipping the
+        /// ones that refused a write.
+        pub fn open(&mut self) {
             let api = match HidApi::new() {
                 Ok(api) => api,
                 Err(e) => {
@@ -308,39 +333,68 @@ mod hid {
                     return;
                 }
             };
-            let Some(info) = api.device_list().find(|d| d.vendor_id() == vid && d.product_id() == pid) else {
-                self.note = format!("not connected (no USB device {vid:04X}:{pid:04X})");
+            let mut found: Vec<_> = api
+                .device_list()
+                .filter(|d| d.vendor_id() == VID && (d.product_id() == PID || OTHER_PIDS.contains(&d.product_id())))
+                .collect();
+            found.sort_by_key(|d| d.product_id() != PID);
+            if found.is_empty() {
+                self.note = format!("not connected: no USB device {VID:04X}:{PID:04X} (plug it in, or check its USB header)");
                 return;
-            };
-            match info.open_device(&api) {
-                Ok(device) => {
-                    crate::paths::log(&format!("digital display: opened {vid:04X}:{pid:04X}, usage page {}", info.usage_page()));
-                    self.device = Some((device, info.usage_page()));
-                    self.failures = 0;
-                }
-                Err(e) => self.note = format!("found it but can't open it ({e})"),
             }
+            if found.iter().all(|d| self.refused.contains(d.path())) {
+                self.refused.clear(); // all tried: start over
+            }
+            let mut why = Vec::new();
+            let untried: Vec<_> = found.iter().filter(|d| !self.refused.contains(d.path())).collect();
+            for info in untried {
+                let what = format!("{VID:04X}:{:04X} page {}", info.product_id(), info.usage_page());
+                match info.open_device(&api) {
+                    Ok(device) => {
+                        crate::paths::log(&format!("digital display: opened {what} (interface {})", info.interface_number()));
+                        self.open = Some(Open { device, page: info.usage_page(), pid: info.product_id(), path: info.path().to_owned(), proven: false });
+                        self.failures = 0;
+                        return;
+                    }
+                    Err(e) => {
+                        why.push(format!("{what}: {e}"));
+                        self.refused.insert(info.path().to_owned());
+                    }
+                }
+            }
+            self.note = format!("found it but can't open it ({})", why.join("; "));
         }
 
-        /// Like the app: a few failed writes in a row are let go, more close it.
+        /// A collection that has taken data is let off a few failed writes in
+        /// a row (the maker's app does the same); one that never has is
+        /// refused, and the next is tried.
         pub fn write(&mut self, data: &[u8]) -> Result<(), String> {
-            let Some((device, _)) = &self.device else { return Err("not open".into()) };
-            match device.write(data) {
+            let Some(open) = &mut self.open else { return Err("not open".into()) };
+            match open.device.write(data) {
                 Ok(_) => {
+                    if !open.proven {
+                        crate::paths::log(&format!("digital display: data goes through on usage page {}", open.page));
+                    }
+                    open.proven = true;
                     self.failures = 0;
                     Ok(())
                 }
-                Err(e) if self.failures < 10 => {
+                Err(e) if open.proven && self.failures < 10 => {
                     self.failures += 1;
-                    let _ = e;
+                    crate::paths::log(&format!("digital display: a write failed ({e}), carrying on"));
                     Ok(())
                 }
-                Err(e) => Err(e.to_string()),
+                Err(e) => {
+                    if !open.proven {
+                        self.refused.insert(open.path.clone());
+                    }
+                    Err(format!("usage page {} took no data ({e})", open.page))
+                }
             }
         }
 
         pub fn close(&mut self) {
-            self.device = None;
+            self.open = None;
         }
     }
 }
@@ -360,8 +414,11 @@ mod hid {
         pub fn usage_page(&self) -> Option<u16> {
             None
         }
-        pub fn open(&mut self, _vid: u16, _pid: u16) {
+        pub fn open(&mut self) {
             self.note = "not connected (Windows only)".into();
+        }
+        pub fn describe(&self) -> String {
+            String::new()
         }
         pub fn write(&mut self, _data: &[u8]) -> Result<(), String> {
             Err("not open".into())
