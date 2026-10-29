@@ -70,6 +70,12 @@ function comboAt(colors, t) {
 let ownColors = ["#ff0080", "#8c00ff", "#00c8ff"];
 
 const lightsMode = () => document.querySelector('input[name="lights-mode"]:checked')?.value ?? "load";
+
+// Each effect keeps its own Speed (one slider shows the one in use), so
+// setting the rainbow fast never speeds up the comets, and back again.
+let speeds = { load: 100, fixed: 100, rainbow: 100 };
+let speedShown = null; // the key the slider shows now
+const speedKey = () => (lightsMode() === "rainbow" ? "rainbow" : lightsMode() === "load" && !$("lights-comet-load").checked ? "fixed" : "load");
 const paletteOwn = () => document.querySelector('input[name="lights-palette"]:checked')?.value === "own";
 
 function readLights() {
@@ -82,12 +88,16 @@ function readLights() {
     comet_load: $("lights-comet-load").checked,
     comet_level: Number($("lights-comet-level").value),
     color: $("lights-color").value,
-    rainbow: paletteOwn() ? ownColors.slice(0, RAINBOW_MAX) : [],
+    // (own colors are saved even while Full rainbow is picked)
+    rainbow: ownColors.slice(0, RAINBOW_MAX),
+    rainbow_own: paletteOwn(),
     rainbow_length: Number($("lights-length").value),
     reverse: $("lights-reverse").checked,
     rainbow_load: $("lights-rainbow-load").checked,
     brightness: Number($("lights-brightness").value),
-    speed: Number($("lights-speed").value),
+    speed: speeds.load,
+    comet_speed: speeds.fixed,
+    rainbow_speed: speeds.rainbow,
     leds_per_zone: Number.isInteger(leds) && leds >= 0 ? leds : config.lights.leds_per_zone,
     device: $("lights-device").value.trim(),
     zones: $("lights-zones").value.trim(),
@@ -104,14 +114,16 @@ function fillLights() {
   $("lights-comet-level").value = String(l.comet_level);
   $("lights-color").value = l.color;
   if (l.rainbow.length) ownColors = [...l.rainbow];
+  const own = (l.rainbow_own ?? l.rainbow.length > 0) && l.rainbow.length > 0;
   for (const radio of document.querySelectorAll('input[name="lights-palette"]')) {
-    radio.checked = radio.value === (l.rainbow.length ? "own" : "spectrum");
+    radio.checked = radio.value === (own ? "own" : "spectrum");
   }
   $("lights-length").value = String(l.rainbow_length);
   $("lights-reverse").checked = l.reverse;
   $("lights-rainbow-load").checked = l.rainbow_load;
   $("lights-brightness").value = String(l.brightness);
-  $("lights-speed").value = String(l.speed);
+  speeds = { load: l.speed, fixed: l.comet_speed || l.speed, rainbow: l.rainbow_speed || l.speed };
+  speedShown = null;
   $("lights-leds").value = String(l.leds_per_zone);
   $("lights-device").value = l.device;
   $("lights-zones").value = l.zones;
@@ -217,6 +229,14 @@ const loopColors = () => (paletteOwn() ? [...ownColors, ownColors[0]] : SPECTRUM
 
 function showLights(redraw = true) {
   const mode = lightsMode();
+  // Switched effect: the slider shows that effect's Speed; else it's the one moved.
+  const key = speedKey();
+  if (key !== speedShown) {
+    $("lights-speed").value = String(speeds[key]);
+    speedShown = key;
+  } else {
+    speeds[key] = Number($("lights-speed").value);
+  }
   for (const row of document.querySelectorAll("[data-mode]")) row.hidden = !row.dataset.mode.split(" ").includes(mode);
   if (redraw) fillSwatches();
   const preview = $("lights-preview");

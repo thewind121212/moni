@@ -57,6 +57,9 @@ no Python and no separate LibreHardwareMonitor window:
     *Speed* 25-200 %). Untick *Follow CPU load* for **Fixed** comets: they
     run at *Speed* (100 % = one comet a second) in a *Color* picked on the
     combo's gradient, whatever the CPU does.
+  - Every effect keeps its own settings (each has its own *Speed*; rainbow
+    colors stay saved while *Full rainbow* is picked), so switching effects
+    and back finds them as they were.
   - **Static:** one still color, from 11 quick picks or any color.
   - **Rainbow:** a wave running along each header, through the full spectrum
     or up to 8 colors of your own (blended in a loop; any combo's colors fill

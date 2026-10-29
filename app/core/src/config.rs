@@ -92,8 +92,17 @@ pub struct Lights {
     pub rainbow_load: bool,
     /// 0-100 %.
     pub brightness: u8,
-    /// How fast the comets or the rainbow run, 25-200 %.
+    /// How fast the comets that follow CPU load run, 25-200 %.
     pub speed: u8,
+    /// Each effect keeps its own Speed, so one never changes another's:
+    /// Fixed comets (100 % = one comet a second) and the rainbow. 0 = not
+    /// set yet (a settings file from before): the same as `speed`.
+    pub comet_speed: u8,
+    pub rainbow_speed: u8,
+    /// Rainbow mode: the user's own colors (`rainbow`) rather than the full
+    /// spectrum. `rainbow` is kept either way, so switching back finds them.
+    /// Unset (a file from before) = own colors when there are any.
+    pub rainbow_own: Option<bool>,
     /// Part of the OpenRGB device name; empty = the motherboard.
     pub device: String,
     /// Comma-separated zone names to light; empty = every zone.
@@ -102,6 +111,23 @@ pub struct Lights {
     /// for an ARGB header; Jonsbo ZA fans have 70+ on one cable). 0 = leave
     /// OpenRGB's sizes alone.
     pub leds_per_zone: u32,
+}
+
+impl Lights {
+    /// The Speed of the effect showing now (each effect has its own), 25-200 %.
+    pub fn active_speed(&self) -> u8 {
+        let own = match self.mode {
+            LightMode::Rainbow => self.rainbow_speed,
+            LightMode::Load if !self.comet_load => self.comet_speed,
+            _ => self.speed,
+        };
+        if own == 0 { self.speed } else { own }
+    }
+
+    /// The rainbow runs through the user's own colors (else the spectrum).
+    pub fn own_rainbow(&self) -> bool {
+        self.rainbow_own.unwrap_or(!self.rainbow.is_empty()) && !self.rainbow.is_empty()
+    }
 }
 
 impl Default for Lights {
@@ -119,6 +145,9 @@ impl Default for Lights {
             rainbow_load: false,
             brightness: 100,
             speed: 100,
+            comet_speed: 0,
+            rainbow_speed: 0,
+            rainbow_own: None,
             device: String::new(),
             zones: String::new(),
             leds_per_zone: 120,
@@ -179,6 +208,10 @@ impl Config {
         lights.brightness = lights.brightness.min(100);
         lights.comet_level = lights.comet_level.min(100);
         lights.speed = lights.speed.clamp(25, 200);
+        for speed in [&mut lights.comet_speed, &mut lights.rainbow_speed] {
+            *speed = if *speed == 0 { lights.speed } else { (*speed).clamp(25, 200) };
+        }
+        lights.rainbow_own = Some(lights.own_rainbow());
         lights.device = lights.device.trim().to_string();
         lights.zones = lights.zones.trim().to_string();
         lights.leds_per_zone = lights.leds_per_zone.min(1024);
@@ -207,6 +240,28 @@ mod tests {
         assert_eq!(config.interval_ms, 1000);
         assert_eq!(config.lights, Lights::default());
         assert!(config.lights.comet_load, "comets follow the CPU unless set to Fixed");
+    }
+
+    #[test]
+    fn each_effect_keeps_its_own_settings() {
+        // A file from before: one Speed for all, own rainbow colors in use.
+        let old: Config = serde_json::from_str(r##"{"lights":{"speed":60,"rainbow":["#ff0000","#00ff00"]}}"##).unwrap();
+        let l = old.sanitized().lights;
+        assert_eq!((l.speed, l.comet_speed, l.rainbow_speed), (60, 60, 60));
+        assert_eq!(l.rainbow_own, Some(true));
+        // From then on each Speed is its own.
+        let mut l = Lights { speed: 50, comet_speed: 120, rainbow_speed: 180, ..Lights::default() };
+        assert_eq!(l.active_speed(), 50);
+        l.comet_load = false;
+        assert_eq!(l.active_speed(), 120);
+        l.mode = LightMode::Rainbow;
+        assert_eq!(l.active_speed(), 180);
+        // "Full rainbow" picked: the own colors stay saved for later.
+        let l = Lights { rainbow: vec!["#ff0000".into(), "#0000ff".into()], rainbow_own: Some(false), ..Lights::default() };
+        assert!(!l.own_rainbow());
+        let l = Config { lights: l, ..Config::default() }.sanitized().lights;
+        assert_eq!(l.rainbow.len(), 2, "kept");
+        assert_eq!(l.rainbow_own, Some(false));
     }
 
     #[test]

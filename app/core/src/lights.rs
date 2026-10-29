@@ -151,7 +151,11 @@ impl Effect {
             LightMode::Load => Effect::Load(combo(settings.combo)),
             LightMode::Static => Effect::Static(rgb(parse_hex(&settings.color).unwrap_or([0, 70, 255]))),
             LightMode::Rainbow => Effect::Rainbow {
-                colors: settings.rainbow.iter().filter_map(|c| parse_hex(c)).map(rgb).collect(),
+                colors: if settings.own_rainbow() {
+                    settings.rainbow.iter().filter_map(|c| parse_hex(c)).map(rgb).collect()
+                } else {
+                    Vec::new()
+                },
                 length: settings.rainbow_length.clamp(6, 240) as f64,
                 reverse: settings.reverse,
             },
@@ -588,7 +592,7 @@ fn run(shared: Arc<Mutex<Shared>>, mut source: Source) {
         }
 
         let now = Instant::now();
-        let (dt, scale) = (now.duration_since(last).as_secs_f64(), settings.speed as f64 / 100.0);
+        let (dt, scale) = (now.duration_since(last).as_secs_f64(), settings.active_speed() as f64 / 100.0);
         let effect = Effect::of(&settings);
         if settings.mode == LightMode::Load && !settings.comet_load {
             motion.fixed(settings.comet_level as f64 / 100.0, dt, FIXED_RATE * scale);
@@ -837,6 +841,11 @@ mod tests {
             Effect::Rainbow { colors: vec![[255.0, 0.0, 0.0], [0.0, 0.0, 255.0]], length: 30.0, reverse: true }
         );
         assert_eq!(s(r#"{"mode":"rainbow"}"#), Effect::Rainbow { colors: vec![], length: 60.0, reverse: false });
+        // Full rainbow picked, own colors kept for later: the spectrum.
+        assert_eq!(
+            s(r##"{"mode":"rainbow","rainbow":["#ff0000","#0000ff"],"rainbow_own":false}"##),
+            Effect::Rainbow { colors: vec![], length: 60.0, reverse: false }
+        );
     }
 
     #[test]
