@@ -9,10 +9,14 @@
 //!   effect   = (cpu / 100) ^ (1/φ)      boosts low load (an idle PC is 0-10 %)
 //!   speed    = 0.22 … 0.22 × φ⁵ passes a second, gliding to the new value
 //!
+//! Or, picked in the app instead: one still color (Static), or a rainbow (the
+//! full spectrum or the user's own colors) running along each zone at a set
+//! speed, optionally faster with load (Rainbow).
+//!
 //! If OpenRGB isn't there (not started yet, closed, SDK server off), this
 //! tries again every 5 s and says why in the app.
 
-use crate::config::Lights as Settings;
+use crate::config::{LightMode, Lights as Settings};
 use crate::openrgb::{self, Client, Controller, TYPE_MOTHERBOARD, ZONE_SINGLE};
 use crate::openrgb_host::{self, Host};
 use std::ffi::OsString;
@@ -24,6 +28,8 @@ const PHI: f64 = 1.618_033_988_749_895;
 const CURVE: f64 = 1.0 / PHI;
 const SPEED_MIN: f64 = 0.22;
 const PERIOD: f64 = 18.0;
+/// How far the rainbow runs at Speed 100 %, in LEDs a second.
+const RAINBOW_RATE: f64 = 24.0;
 const FRAME: Duration = Duration::from_millis(33);
 const RETRY: Duration = Duration::from_secs(5);
 /// How often the device list is read again (zones resized in OpenRGB, a
@@ -36,6 +42,7 @@ fn speed_max() -> f64 {
 
 type Rgb = [f64; 3];
 
+#[derive(Debug, PartialEq)]
 pub struct Combo {
     pub name: &'static str,
     /// Low load, middle, high load. Fire & Ice has no middle.
@@ -96,6 +103,79 @@ fn dim(c: Rgb, brightness: f64) -> [u8; 3] {
     c.map(|v| (v * brightness).round().clamp(0.0, 255.0) as u8)
 }
 
+/// "#rrggbb" (or without the #, any case) -> the color.
+pub fn parse_hex(text: &str) -> Option<[u8; 3]> {
+    let hex = text.trim().trim_start_matches('#');
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let at = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some([at(0)?, at(2)?, at(4)?])
+}
+
+pub fn to_hex(c: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+}
+
+/// The spectrum at `t` (0-1 once round): red, yellow, green, cyan, blue,
+/// magenta, back to red.
+pub fn spectrum(t: f64) -> Rgb {
+    let h = mod1(t) * 6.0;
+    let x = 255.0 * (1.0 - (h % 2.0 - 1.0).abs());
+    match h as u8 {
+        0 => [255.0, x, 0.0],
+        1 => [x, 255.0, 0.0],
+        2 => [0.0, 255.0, x],
+        3 => [0.0, x, 255.0],
+        4 => [x, 0.0, 255.0],
+        _ => [255.0, 0.0, x],
+    }
+}
+
+/// What the fans show, from the settings.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Effect {
+    Load(&'static Combo),
+    Static(Rgb),
+    /// `colors` empty: the spectrum. `length`: LEDs one rainbow spans.
+    Rainbow { colors: Vec<Rgb>, length: f64, reverse: bool },
+}
+
+impl Effect {
+    pub fn of(settings: &Settings) -> Effect {
+        let rgb = |c: [u8; 3]| c.map(f64::from);
+        match settings.mode {
+            LightMode::Load => Effect::Load(combo(settings.combo)),
+            LightMode::Static => Effect::Static(rgb(parse_hex(&settings.color).unwrap_or([0, 70, 255]))),
+            LightMode::Rainbow => Effect::Rainbow {
+                colors: settings.rainbow.iter().filter_map(|c| parse_hex(c)).map(rgb).collect(),
+                length: settings.rainbow_length.clamp(6, 240) as f64,
+                reverse: settings.reverse,
+            },
+        }
+    }
+}
+
+/// The rainbow's color at `t` (0-1 once round): the spectrum, or the colors
+/// blended one into the next and the last back into the first.
+pub fn rainbow_at(colors: &[Rgb], t: f64) -> Rgb {
+    match colors {
+        [] => spectrum(t),
+        [only] => *only,
+        _ => {
+            let x = mod1(t) * colors.len() as f64;
+            let i = (x as usize).min(colors.len() - 1);
+            mix(colors[i], colors[(i + 1) % colors.len()], x - i as f64)
+        }
+    }
+}
+
+/// One zone of the rainbow: `n` LEDs, `phase` (0-1) how far it has run.
+pub fn rainbow_frame(n: usize, phase: f64, colors: &[Rgb], length: f64, reverse: bool, brightness: f64) -> Vec<[u8; 3]> {
+    let dir = if reverse { 1.0 } else { -1.0 };
+    (0..n).map(|i| dim(rainbow_at(colors, i as f64 / length + dir * phase), brightness)).collect()
+}
+
 /// One zone's colors: `n` LEDs, the comets at `pos` (0-1, one comet length),
 /// at effect level `level`, dimmed to `brightness` (0-1).
 pub fn frame(n: usize, pos: f64, level: f64, combo: &Combo, brightness: f64) -> Vec<[u8; 3]> {
@@ -136,6 +216,8 @@ pub fn frame(n: usize, pos: f64, level: f64, combo: &Combo, brightness: f64) -> 
 pub struct Motion {
     pub level: f64,
     pub pos: f64,
+    /// How far the rainbow has run, in rainbow lengths (0-1).
+    pub phase: f64,
 }
 
 impl Motion {
@@ -144,6 +226,14 @@ impl Motion {
         let dt = dt.clamp(0.0, 0.1);
         self.level += (target - self.level) * (dt * 2.0).min(1.0);
         self.pos = mod1(self.pos + speed(self.level) * scale * dt);
+    }
+
+    /// The rainbow runs RAINBOW_RATE LEDs a second at `scale` 1; with `load`,
+    /// half that when idle up to twice that at full load (the gliding level).
+    pub fn roll(&mut self, dt: f64, scale: f64, length: f64, load: bool) {
+        let dt = dt.clamp(0.0, 0.1);
+        let boost = if load { 0.5 + 1.5 * self.level } else { 1.0 };
+        self.phase = mod1(self.phase + RAINBOW_RATE * scale * boost * dt / length.max(1.0));
     }
 }
 
@@ -168,17 +258,26 @@ pub fn chosen_zones(controller: &Controller, wanted: &str) -> Vec<bool> {
 /// (each zone from its own first LED, like each header on its own), the rest
 /// keep what OpenRGB had. A zone of one LED (the board's own light, a 12 V RGB
 /// header) can't show a comet, and pulsing it would flash the whole thing at
-/// every pass: it glows steadily in the head color instead.
-pub fn board_frame(controller: &Controller, chosen: &[bool], motion: &Motion, combo: &Combo, brightness: f64) -> Vec<[u8; 3]> {
+/// every pass: it glows steadily in the head color instead (in a rainbow, it
+/// slowly turns through the colors).
+pub fn board_frame(controller: &Controller, chosen: &[bool], motion: &Motion, effect: &Effect, brightness: f64) -> Vec<[u8; 3]> {
     let mut out = Vec::with_capacity(controller.led_count());
     for (i, zone) in controller.zones.iter().enumerate() {
         let start = out.len();
+        let n = zone.leds as usize;
         if !chosen.get(i).copied().unwrap_or(false) {
-            out.extend((start..start + zone.leds as usize).map(|at| controller.colors.get(at).copied().unwrap_or([0, 0, 0])));
-        } else if zone.kind == ZONE_SINGLE || zone.leds <= 1 {
-            out.extend(std::iter::repeat_n(dim(head(motion.level, combo), brightness), zone.leds as usize));
-        } else {
-            out.extend(frame(zone.leds as usize, motion.pos, motion.level, combo, brightness));
+            out.extend((start..start + n).map(|at| controller.colors.get(at).copied().unwrap_or([0, 0, 0])));
+            continue;
+        }
+        let single = zone.kind == ZONE_SINGLE || zone.leds <= 1;
+        match effect {
+            Effect::Load(combo) if single => out.extend(std::iter::repeat_n(dim(head(motion.level, combo), brightness), n)),
+            Effect::Load(combo) => out.extend(frame(n, motion.pos, motion.level, combo, brightness)),
+            Effect::Static(color) => out.extend(std::iter::repeat_n(dim(*color, brightness), n)),
+            Effect::Rainbow { colors, reverse, .. } if single => {
+                out.extend(std::iter::repeat_n(rainbow_frame(1, motion.phase, colors, 1.0, *reverse, brightness)[0], n))
+            }
+            Effect::Rainbow { colors, length, reverse } => out.extend(rainbow_frame(n, motion.phase, colors, *length, *reverse, brightness)),
         }
     }
     out
@@ -318,7 +417,7 @@ pub fn rival(cmd: &[OsString]) -> bool {
 /// device on its own thread, so give it a moment before it's closed.
 fn blackout(client: &mut Option<Client>, target: &Option<Target>) {
     if let (Some(c), Some(t)) = (client.as_mut(), target.as_ref()) {
-        let colors = board_frame(&t.controller, &t.chosen, &Motion::default(), combo(1), 0.0);
+        let colors = board_frame(&t.controller, &t.chosen, &Motion::default(), &Effect::Static([0.0; 3]), 0.0);
         if c.update_leds(t.controller.index, &colors).is_ok() {
             std::thread::sleep(Duration::from_millis(300));
         }
@@ -478,10 +577,15 @@ fn run(shared: Arc<Mutex<Shared>>, mut source: Source) {
         }
 
         let now = Instant::now();
-        motion.step(effect_level(cpu), now.duration_since(last).as_secs_f64(), settings.speed as f64 / 100.0);
+        let (dt, scale) = (now.duration_since(last).as_secs_f64(), settings.speed as f64 / 100.0);
+        let effect = Effect::of(&settings);
+        motion.step(effect_level(cpu), dt, scale);
+        if let Effect::Rainbow { length, .. } = &effect {
+            motion.roll(dt, scale, *length, settings.rainbow_load);
+        }
         last = now;
         if let Some(t) = &target {
-            let colors = board_frame(&t.controller, &t.chosen, &motion, combo(settings.combo), settings.brightness as f64 / 100.0);
+            let colors = board_frame(&t.controller, &t.chosen, &motion, &effect, settings.brightness as f64 / 100.0);
             if let Err(e) = c.update_leds(t.controller.index, &colors) {
                 note(false, format!("OpenRGB stopped answering ({e}); trying again"), &mut said);
                 client = None;
@@ -576,7 +680,7 @@ mod tests {
         assert!(m.level > 0.99);
         assert!((0.0..1.0).contains(&m.pos));
         // Speed 50 %: half as far per frame.
-        let (mut full, mut half) = (Motion { level: 0.3, pos: 0.0 }, Motion { level: 0.3, pos: 0.0 });
+        let (mut full, mut half) = (Motion { level: 0.3, ..Motion::default() }, Motion { level: 0.3, ..Motion::default() });
         full.step(0.3, 0.05, 1.0);
         half.step(0.3, 0.05, 0.5);
         assert!((half.pos * 2.0 - full.pos).abs() < 1e-9);
@@ -611,7 +715,7 @@ mod tests {
     #[test]
     fn one_frame_covers_the_whole_board() {
         let b = board();
-        let colors = board_frame(&b, &[true, false, true], &Motion::default(), combo(12), 1.0);
+        let colors = board_frame(&b, &[true, false, true], &Motion::default(), &Effect::Load(combo(12)), 1.0);
         assert_eq!(colors.len(), 6);
         assert_eq!(colors[0], [0, 70, 255]); // ARGB_V2_1 from its own first LED
         assert_eq!(colors[3], [9, 9, 9]); // the zone left alone keeps its color
@@ -621,11 +725,100 @@ mod tests {
     #[test]
     fn a_single_led_zone_glows_steadily() {
         let b = board();
-        let at = |pos: f64| board_frame(&b, &[true, true, true], &Motion { level: 0.0, pos }, combo(12), 1.0)[3];
+        let at = |pos: f64| board_frame(&b, &[true, true, true], &Motion { level: 0.0, pos, ..Motion::default() }, &Effect::Load(combo(12)), 1.0)[3];
         assert_eq!(at(0.0), [0, 70, 255]);
         assert_eq!(at(0.5), [0, 70, 255], "no pulse as the comets pass");
         assert_eq!(at(0.9), [0, 70, 255]);
-        assert_eq!(board_frame(&b, &[true, true, true], &Motion { level: 1.0, pos: 0.3 }, combo(12), 1.0)[3], [220, 0, 255]);
+        assert_eq!(board_frame(&b, &[true, true, true], &Motion { level: 1.0, pos: 0.3, ..Motion::default() }, &Effect::Load(combo(12)), 1.0)[3], [220, 0, 255]);
+    }
+
+    #[test]
+    fn static_is_one_still_color() {
+        let b = board();
+        let red = Effect::Static([255.0, 0.0, 0.0]);
+        let first = board_frame(&b, &[true, true, false], &Motion::default(), &red, 0.5);
+        let later = board_frame(&b, &[true, true, false], &Motion { level: 0.9, pos: 0.4, phase: 0.7 }, &red, 0.5);
+        assert_eq!(first, later, "it doesn't move");
+        assert_eq!(&first[..4], &[[128, 0, 0]; 4]);
+        assert_eq!(first[4], [9, 9, 9], "the zone left alone keeps its color");
+    }
+
+    #[test]
+    fn hex_colors() {
+        assert_eq!(parse_hex("#FF8000"), Some([255, 128, 0]));
+        assert_eq!(parse_hex(" 00ff7f "), Some([0, 255, 127]));
+        assert_eq!(parse_hex("#f80"), None);
+        assert_eq!(parse_hex("#gg0000"), None);
+        assert_eq!(to_hex([255, 128, 0]), "#ff8000");
+    }
+
+    #[test]
+    fn the_spectrum_goes_round() {
+        assert_eq!(dim(spectrum(0.0), 1.0), [255, 0, 0]);
+        assert_eq!(dim(spectrum(1.0 / 3.0), 1.0), [0, 255, 0]);
+        assert_eq!(dim(spectrum(2.0 / 3.0), 1.0), [0, 0, 255]);
+        assert_eq!(dim(spectrum(1.0), 1.0), [255, 0, 0]);
+        assert_eq!(dim(spectrum(1.0 / 12.0), 1.0), [255, 128, 0], "red to yellow");
+    }
+
+    #[test]
+    fn own_colors_blend_and_loop() {
+        let rb = [[255.0, 0.0, 0.0], [0.0, 0.0, 255.0]];
+        assert_eq!(dim(rainbow_at(&rb, 0.0), 1.0), [255, 0, 0]);
+        assert_eq!(dim(rainbow_at(&rb, 0.25), 1.0), [128, 0, 128]);
+        assert_eq!(dim(rainbow_at(&rb, 0.5), 1.0), [0, 0, 255]);
+        assert_eq!(dim(rainbow_at(&rb, 0.75), 1.0), [128, 0, 128], "back to the first");
+        assert_eq!(dim(rainbow_at(&[[1.0, 2.0, 3.0]], 0.6), 1.0), [1, 2, 3]);
+    }
+
+    #[test]
+    fn the_rainbow_runs_along_the_zone() {
+        // 12 LEDs a rainbow: LED 4 is a third of the way round (green).
+        let strip = rainbow_frame(24, 0.0, &[], 12.0, false, 1.0);
+        assert_eq!((strip[0], strip[4], strip[8], strip[12]), ([255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 0, 0]));
+        // Run a third of a rainbow: the red moves 4 LEDs on (backwards with reverse).
+        let on = rainbow_frame(24, 1.0 / 3.0, &[], 12.0, false, 1.0);
+        assert_eq!(on[4], [255, 0, 0]);
+        let back = rainbow_frame(24, 1.0 / 3.0, &[], 12.0, true, 1.0);
+        assert_eq!(back[8], [255, 0, 0]);
+        assert_eq!(rainbow_frame(1, 0.0, &[], 12.0, false, 0.5)[0], [128, 0, 0]);
+    }
+
+    #[test]
+    fn rainbow_speed() {
+        // 100 %, 60 LEDs a rainbow: 24 LEDs a second = 0.4 rainbows a second.
+        let mut m = Motion::default();
+        m.roll(0.05, 1.0, 60.0, false);
+        assert!((m.phase - 0.02).abs() < 1e-9, "{}", m.phase);
+        let mut half = Motion::default();
+        half.roll(0.05, 0.5, 60.0, false);
+        assert!((half.phase - 0.01).abs() < 1e-9);
+        // With load: half speed idle, twice at full load.
+        let (mut idle, mut busy) = (Motion::default(), Motion { level: 1.0, ..Motion::default() });
+        idle.roll(0.05, 1.0, 60.0, true);
+        busy.roll(0.05, 1.0, 60.0, true);
+        assert!((idle.phase - 0.01).abs() < 1e-9 && (busy.phase - 0.04).abs() < 1e-9);
+    }
+
+    #[test]
+    fn effects_from_settings() {
+        let s = |json: &str| Effect::of(&serde_json::from_str::<Settings>(json).unwrap());
+        assert_eq!(s("{}"), Effect::Load(combo(12)));
+        assert_eq!(s(r##"{"mode":"static","color":"#ff0000"}"##), Effect::Static([255.0, 0.0, 0.0]));
+        assert_eq!(
+            s(r##"{"mode":"rainbow","rainbow":["#ff0000","#0000ff"],"rainbow_length":30,"reverse":true}"##),
+            Effect::Rainbow { colors: vec![[255.0, 0.0, 0.0], [0.0, 0.0, 255.0]], length: 30.0, reverse: true }
+        );
+        assert_eq!(s(r#"{"mode":"rainbow"}"#), Effect::Rainbow { colors: vec![], length: 60.0, reverse: false });
+    }
+
+    #[test]
+    fn a_single_led_zone_turns_slowly_in_a_rainbow() {
+        let b = board();
+        let rainbow = Effect::Rainbow { colors: vec![], length: 12.0, reverse: false };
+        let at = |phase: f64| board_frame(&b, &[true, true, true], &Motion { phase, ..Motion::default() }, &rainbow, 1.0)[3];
+        assert_eq!(at(0.0), [255, 0, 0]);
+        assert_eq!(at(1.0 / 3.0), [0, 0, 255], "one color for the whole LED, turning with the run");
     }
 
     #[test]

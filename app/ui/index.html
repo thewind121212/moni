@@ -121,27 +121,71 @@
 
           <label class="row toggle">
             <span>
-              <strong>Glow with CPU load</strong>
+              <strong>Light the fans</strong>
               <small>Moni runs its own OpenRGB in the background, from boot: nothing to install or open. Close any OpenRGB you started yourself, and cpu_rgb.py, or they fight and flash. The LEDs go off when the PC shuts down or sleeps.</small>
             </span>
             <input type="checkbox" id="lights-enabled">
           </label>
 
           <div class="row stack">
-            <strong>Colors</strong>
-            <select id="lights-combo"></select>
+            <strong>Effect</strong>
+            <div class="segmented" role="radiogroup" aria-label="Effect">
+              <label><input type="radio" name="lights-mode" value="load"><span>CPU load</span></label>
+              <label><input type="radio" name="lights-mode" value="static"><span>Static</span></label>
+              <label><input type="radio" name="lights-mode" value="rainbow"><span>Rainbow</span></label>
+            </div>
             <div class="lights-preview" id="lights-preview" aria-hidden="true"></div>
           </div>
+
+          <div class="row stack" data-mode="load">
+            <strong>Colors</strong>
+            <select id="lights-combo"></select>
+            <small>Comets run faster and hotter with CPU load.</small>
+          </div>
+
+          <div class="row stack" data-mode="static">
+            <strong>Color</strong>
+            <div class="swatches" id="lights-swatches">
+              <input type="color" id="lights-color" title="Any color">
+            </div>
+          </div>
+
+          <div class="row stack" data-mode="rainbow">
+            <strong>Colors</strong>
+            <label class="radio"><input type="radio" name="lights-palette" value="spectrum"> Full rainbow</label>
+            <label class="radio"><input type="radio" name="lights-palette" value="own"> My colors (they blend into each other in a loop)</label>
+            <div class="swatches" id="lights-rainbow"></div>
+            <div class="swatches" id="lights-palettes"></div>
+          </div>
+
+          <div class="row stack" data-mode="rainbow">
+            <strong>Length <span class="muted" id="lights-length-value"></span></strong>
+            <input type="range" id="lights-length" min="6" max="240" step="6">
+            <small>LEDs one whole rainbow spans. Short is busy, long is a slow wash.</small>
+          </div>
+
+          <label class="row toggle" data-mode="rainbow">
+            <span><strong>Run the other way</strong></span>
+            <input type="checkbox" id="lights-reverse">
+          </label>
+
+          <label class="row toggle" data-mode="rainbow">
+            <span>
+              <strong>Faster with CPU load</strong>
+              <small>Half speed when idle, up to twice as fast at full load.</small>
+            </span>
+            <input type="checkbox" id="lights-rainbow-load">
+          </label>
 
           <div class="row stack">
             <strong>Brightness <span class="muted" id="lights-brightness-value"></span></strong>
             <input type="range" id="lights-brightness" min="5" max="100" step="5">
           </div>
 
-          <div class="row stack">
+          <div class="row stack" data-mode="load rainbow">
             <strong>Speed <span class="muted" id="lights-speed-value"></span></strong>
             <input type="range" id="lights-speed" min="25" max="200" step="5">
-            <small>100 % is cpu_rgb.py's speed. Lower is calmer.</small>
+            <small id="lights-speed-hint">100 % is cpu_rgb.py's speed. Lower is calmer.</small>
           </div>
 
           <div class="row stack">

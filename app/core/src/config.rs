@@ -49,16 +49,43 @@ pub struct Config {
     pub lights: Lights,
 }
 
+/// What the fans show. See [`crate::lights::Effect`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LightMode {
+    /// Comets in a combo's colors, faster and hotter with CPU load.
+    #[default]
+    Load,
+    /// One color, still.
+    Static,
+    /// A running rainbow (or the user's own colors) along each zone.
+    Rainbow,
+}
+
+pub const RAINBOW_COLORS_MAX: usize = 8;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Lights {
     /// Off until switched on, so it never fights another RGB program.
     pub enabled: bool,
-    /// 1-12, see [`crate::lights::COMBOS`]; 12 = Blue & Purple.
+    pub mode: LightMode,
+    /// Load mode: 1-12, see [`crate::lights::COMBOS`]; 12 = Blue & Purple.
     pub combo: u8,
+    /// Static mode: "#rrggbb".
+    pub color: String,
+    /// Rainbow mode: the colors it runs through ("#rrggbb", up to 8, looping
+    /// back to the first); empty = the full spectrum.
+    pub rainbow: Vec<String>,
+    /// Rainbow mode: LEDs one whole rainbow spans, 6-240.
+    pub rainbow_length: u32,
+    /// Rainbow mode: runs the other way along the zones.
+    pub reverse: bool,
+    /// Rainbow mode: runs faster with CPU load.
+    pub rainbow_load: bool,
     /// 0-100 %.
     pub brightness: u8,
-    /// How fast the comets run, 25-200 % of the page's speeds.
+    /// How fast the comets or the rainbow run, 25-200 %.
     pub speed: u8,
     /// Part of the OpenRGB device name; empty = the motherboard.
     pub device: String,
@@ -72,7 +99,21 @@ pub struct Lights {
 
 impl Default for Lights {
     fn default() -> Self {
-        Self { enabled: false, combo: 12, brightness: 100, speed: 100, device: String::new(), zones: String::new(), leds_per_zone: 120 }
+        Self {
+            enabled: false,
+            mode: LightMode::Load,
+            combo: 12,
+            color: "#0046ff".into(),
+            rainbow: Vec::new(),
+            rainbow_length: 60,
+            reverse: false,
+            rainbow_load: false,
+            brightness: 100,
+            speed: 100,
+            device: String::new(),
+            zones: String::new(),
+            leds_per_zone: 120,
+        }
     }
 }
 
@@ -123,6 +164,9 @@ impl Config {
         self.control_key = self.control_key.trim().to_string();
         let lights = &mut self.lights;
         lights.combo = lights.combo.clamp(1, crate::lights::COMBOS.len() as u8);
+        lights.color = crate::lights::parse_hex(&lights.color).map(crate::lights::to_hex).unwrap_or_else(|| Lights::default().color);
+        lights.rainbow = lights.rainbow.iter().filter_map(|c| crate::lights::parse_hex(c)).map(crate::lights::to_hex).take(RAINBOW_COLORS_MAX).collect();
+        lights.rainbow_length = lights.rainbow_length.clamp(6, 240);
         lights.brightness = lights.brightness.min(100);
         lights.speed = lights.speed.clamp(25, 200);
         lights.device = lights.device.trim().to_string();
@@ -161,5 +205,21 @@ mod tests {
         assert!(lights.enabled);
         assert_eq!((lights.combo, lights.brightness, lights.speed, lights.leds_per_zone), (12, 100, 25, 120));
         assert_eq!(lights.zones, "ARGB_V2_1");
+        assert_eq!(lights.mode, LightMode::Load, "settings from before the modes keep the load effect");
+    }
+
+    #[test]
+    fn colors_are_cleaned_up() {
+        let config: Config = serde_json::from_str(
+            r##"{"lights":{"mode":"rainbow","color":"red","rainbow":["#FF0000"," 00ff00 ","nope","#123","#0000ff"],"rainbow_length":2}}"##,
+        )
+        .unwrap();
+        let lights = config.sanitized().lights;
+        assert_eq!(lights.mode, LightMode::Rainbow);
+        assert_eq!(lights.color, "#0046ff", "a bad color goes back to the default");
+        assert_eq!(lights.rainbow, ["#ff0000", "#00ff00", "#0000ff"]);
+        assert_eq!(lights.rainbow_length, 6);
+        let many: Config = serde_json::from_str(&format!(r#"{{"lights":{{"rainbow":{:?}}}}}"#, vec!["#ffffff"; 12])).unwrap();
+        assert_eq!(many.sanitized().lights.rainbow.len(), RAINBOW_COLORS_MAX);
     }
 }

@@ -50,10 +50,17 @@ no Python and no separate LibreHardwareMonitor window:
   start-up settings every 5 s (no visible change on a working screen), so a
   module that was re-seated or lost power for a moment wakes up again.
 - **Fan lights** (off until switched on in the app): the service colors the
-  motherboard's ARGB headers with CPU load, 30 times a second. More load
-  gives faster comets and a head further along the chosen colors (12 combos,
-  default Blue & Purple; *Speed* 25-200 %). It replaces `cpu_rgb.py` and
-  starts with Windows.
+  motherboard's ARGB headers, 30 times a second. It replaces `cpu_rgb.py` and
+  starts with Windows. Three effects, with *Brightness*:
+  - **CPU load** (the default): more load gives faster comets and a head
+    further along the chosen colors (12 combos, default Blue & Purple;
+    *Speed* 25-200 %).
+  - **Static:** one still color, from 11 quick picks or any color.
+  - **Rainbow:** a wave running along each header, through the full spectrum
+    or up to 8 colors of your own (blended in a loop; any combo's colors fill
+    them in one click). *Length* is the LEDs one rainbow spans (6-240),
+    *Speed* 25-200 % of 24 LEDs a second, and it can run the other way or
+    faster with CPU load (half speed idle, twice at full load).
   - **Its own OpenRGB:** the installer ships [OpenRGB](https://codeberg.org/OpenRGB/OpenRGB)
     1.1 unmodified (GPL-2.0, pinned by SHA-256 in the workflow; license and
     source link in `openrgb\`). The service runs it with no window, as a
@@ -68,7 +75,8 @@ no Python and no separate LibreHardwareMonitor window:
   - **No fighting:** while `cpu_rgb.py` or an OpenRGB the user started is
     running, Moni pauses and says so (two programs on the same LEDs flash).
   - Addressable zones are sized to *LEDs per header* (120; OpenRGB guesses
-    10); a one-LED zone glows steadily in the head color.
+    10); a one-LED zone glows steadily in the head color (in a rainbow, it
+    turns slowly through the colors).
   - Code: `app/core/src/lights.rs` (effect), `openrgb.rs` (SDK client),
     `openrgb_host.rs` (the bundled OpenRGB).
 
