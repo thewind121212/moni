@@ -225,13 +225,17 @@ mod tests {
 
     #[test]
     fn restarts_a_program_that_stops() {
-        // A stand-in that exits at once: the host notices and waits before the next start.
-        let mut host = Host::new(PathBuf::from("/bin/true"));
+        // A stand-in that exits at once on any OS: this test binary, which
+        // refuses OpenRGB's flags. The host notices and waits before the next start.
+        let mut host = Host::new(std::env::current_exe().unwrap());
         host.swept = true;
         host.ensure();
         assert!(host.running());
-        std::thread::sleep(Duration::from_millis(200));
-        host.ensure();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while host.running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            host.ensure();
+        }
         assert!(!host.running(), "noticed it stopped");
         assert!(host.note.contains("stopped"), "{}", host.note);
         host.ensure();
