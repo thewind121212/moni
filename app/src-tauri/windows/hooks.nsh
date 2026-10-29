@@ -2,7 +2,7 @@
 ; for a per-machine install). All the work lives in moni-service.exe:
 ;   install   - installs the PawnIO sensor driver, retires the old Python
 ;               sender, registers and starts the service
-;   uninstall - stops and removes the service
+;   uninstall - stops and removes the service (and with it Moni's OpenRGB)
 
 !macro NSIS_HOOK_PREINSTALL
   ; Upgrade: stop the running service so its files can be replaced.
@@ -17,4 +17,9 @@
 
 !macro NSIS_HOOK_PREUNINSTALL
   nsExec::Exec '"$INSTDIR\moni-service.exe" uninstall'
+!macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  ; Moni's OpenRGB keeps its settings next to it (written at run time).
+  RMDir /r "$INSTDIR\openrgb\config"
 !macroend

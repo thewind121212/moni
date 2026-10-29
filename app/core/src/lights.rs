@@ -14,9 +14,10 @@
 
 use crate::config::Lights as Settings;
 use crate::openrgb::{self, Client, Controller, TYPE_MOTHERBOARD, ZONE_SINGLE};
+use crate::openrgb_host::{self, Host};
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::System;
 use std::time::{Duration, Instant};
 
 const PHI: f64 = 1.618_033_988_749_895;
@@ -183,14 +184,76 @@ pub fn board_frame(controller: &Controller, chosen: &[bool], motion: &Motion, co
     out
 }
 
-/// Shared between the service loop (settings, CPU samples) and the light thread.
+/// Shared between the service loop (settings, CPU samples), the service's
+/// power events and the light thread.
 #[derive(Default)]
 struct Shared {
     settings: Settings,
     cpu: Option<f64>,
     on: bool,
     note: String,
+    /// Windows is going to sleep: lights off until it wakes.
+    asleep: bool,
+    /// The thread has turned them off for the sleep.
+    dark: bool,
     stop: bool,
+    finished: bool,
+}
+
+/// The service's lights, for power events (they come in on the service's
+/// control thread, which doesn't see the engine).
+static CURRENT: Mutex<Option<Arc<Mutex<Shared>>>> = Mutex::new(None);
+
+/// Windows is about to sleep: turn the LEDs off (the board keeps the ARGB
+/// headers powered while asleep, showing the last frame) and stop Moni's
+/// OpenRGB (USB devices come back new after a sleep). Waits up to `wait`.
+pub fn suspend(wait: Duration) {
+    let Some(shared) = CURRENT.lock().unwrap().clone() else { return };
+    shared.lock().unwrap().asleep = true;
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline && !shared.lock().unwrap().dark {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Windows woke up: the lights come back (OpenRGB starts afresh).
+pub fn resume() {
+    if let Some(shared) = CURRENT.lock().unwrap().clone() {
+        let mut s = shared.lock().unwrap();
+        s.asleep = false;
+        s.dark = false;
+    }
+}
+
+/// Where the colors go: Moni's own OpenRGB (bundled), or one the user runs on
+/// OpenRGB's usual port (a build without the bundle, and the tests).
+pub enum Source {
+    Own(Host),
+    External(String),
+}
+
+impl Source {
+    pub fn pick() -> Source {
+        let exe = openrgb_host::bundled_exe();
+        if exe.exists() {
+            Source::Own(Host::new(exe))
+        } else {
+            Source::External(openrgb::DEFAULT_ADDR.into())
+        }
+    }
+
+    fn addr(&self) -> String {
+        match self {
+            Source::Own(_) => openrgb_host::addr(),
+            Source::External(addr) => addr.clone(),
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Source::Own(host) = self {
+            host.stop();
+        }
+    }
 }
 
 pub struct Lights {
@@ -200,8 +263,9 @@ pub struct Lights {
 impl Lights {
     pub fn start(settings: Settings) -> Lights {
         let shared = Arc::new(Mutex::new(Shared { settings, note: "starting".into(), ..Shared::default() }));
+        *CURRENT.lock().unwrap() = Some(shared.clone());
         let inner = shared.clone();
-        let _ = std::thread::Builder::new().name("lights".into()).spawn(move || run(inner, openrgb::DEFAULT_ADDR));
+        let _ = std::thread::Builder::new().name("lights".into()).spawn(move || run(inner, Source::pick()));
         Lights { shared }
     }
 
@@ -225,8 +289,15 @@ impl Lights {
         (shared.on, shared.note.clone())
     }
 
-    pub fn stop(&self) {
+    /// The service is stopping (Windows shutting down or restarting, or an
+    /// update): LEDs off, then Moni's OpenRGB closed. Waits up to `wait`, so
+    /// it never holds Windows up.
+    pub fn shutdown(&self, wait: Duration) {
         self.shared.lock().unwrap().stop = true;
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline && !self.shared.lock().unwrap().finished {
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
@@ -243,12 +314,18 @@ pub fn rival(cmd: &[OsString]) -> bool {
     cmd.iter().any(|arg| arg.to_string_lossy().to_lowercase().replace('\\', "/").ends_with("cpu_rgb.py"))
 }
 
-fn find_rival(system: &mut System) -> Option<String> {
-    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cmd(UpdateKind::OnlyIfNotSet));
-    system.processes().values().find(|p| rival(p.cmd())).map(|p| format!("cpu_rgb.py (process {})", p.pid()))
+/// The lit zones black (the others as they were). OpenRGB hands colors to the
+/// device on its own thread, so give it a moment before it's closed.
+fn blackout(client: &mut Option<Client>, target: &Option<Target>) {
+    if let (Some(c), Some(t)) = (client.as_mut(), target.as_ref()) {
+        let colors = board_frame(&t.controller, &t.chosen, &Motion::default(), combo(1), 0.0);
+        if c.update_leds(t.controller.index, &colors).is_ok() {
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }
 }
 
-fn run(shared: Arc<Mutex<Shared>>, addr: &str) {
+fn run(shared: Arc<Mutex<Shared>>, mut source: Source) {
     let mut client: Option<Client> = None;
     let mut target: Option<Target> = None;
     let mut retry_at = Instant::now();
@@ -262,13 +339,10 @@ fn run(shared: Arc<Mutex<Shared>>, addr: &str) {
 
     loop {
         let started = Instant::now();
-        let (settings, cpu, stop) = {
+        let (settings, cpu, stop, asleep, dark) = {
             let s = shared.lock().unwrap();
-            (s.settings.clone(), s.cpu.unwrap_or(0.0), s.stop)
+            (s.settings.clone(), s.cpu.unwrap_or(0.0), s.stop, s.asleep, s.dark)
         };
-        if stop {
-            break;
-        }
         let note = |on: bool, text: String, said: &mut String| {
             if *said != text {
                 crate::paths::log(&format!("fan lights: {text}"));
@@ -279,10 +353,29 @@ fn run(shared: Arc<Mutex<Shared>>, addr: &str) {
             s.note = text;
         };
 
-        if !settings.enabled {
-            if client.take().is_some() {
+        if stop {
+            blackout(&mut client, &target);
+            source.stop();
+            shared.lock().unwrap().finished = true;
+            break;
+        }
+        if asleep {
+            if !dark {
+                blackout(&mut client, &target);
+                client = None;
                 target = None;
+                source.stop();
+                shared.lock().unwrap().dark = true;
+                note(false, "off while the PC sleeps".into(), &mut said);
             }
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        if !settings.enabled {
+            blackout(&mut client, &target);
+            client = None;
+            target = None;
+            source.stop();
             note(false, "off".into(), &mut said);
             std::thread::sleep(Duration::from_millis(250));
             continue;
@@ -290,13 +383,31 @@ fn run(shared: Arc<Mutex<Shared>>, addr: &str) {
 
         if rival_at <= Instant::now() {
             rival_at = Instant::now() + RETRY;
-            rival_seen = find_rival(&mut system);
+            let own = match &source {
+                Source::Own(host) => Some(host.exe().to_path_buf()),
+                Source::External(_) => None,
+            };
+            rival_seen = openrgb_host::find_rival(&mut system, own.as_deref());
         }
-        if let Some(other) = &rival_seen {
-            // Leave the fans to it rather than both flashing them.
-            note(false, format!("paused: {other} is lighting the fans too, and the two would flash. Stop it (Stop-Process -Name pythonw) and remove it from startup."), &mut said);
+        if let Some(text) = &rival_seen {
+            // Leave the fans to the other program rather than both flashing them.
+            client = None;
+            target = None;
+            source.stop();
+            note(false, text.clone(), &mut said);
             std::thread::sleep(Duration::from_millis(250));
             continue;
+        }
+
+        if let Source::Own(host) = &mut source {
+            host.ensure();
+            if !host.running() {
+                client = None;
+                let text = if host.note.is_empty() { "starting OpenRGB".to_string() } else { host.note.clone() };
+                note(false, text, &mut said);
+                std::thread::sleep(Duration::from_millis(250));
+                continue;
+            }
         }
 
         if client.is_none() {
@@ -304,11 +415,23 @@ fn run(shared: Arc<Mutex<Shared>>, addr: &str) {
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
-            match Client::connect(addr, "Moni") {
-                Ok(c) => client = Some(c),
+            let addr = source.addr();
+            match Client::connect(&addr, "Moni") {
+                Ok(c) => {
+                    client = Some(c);
+                    scan_at = Instant::now();
+                }
                 Err(e) => {
-                    note(false, format!("can't reach OpenRGB on {addr} ({e}). Open OpenRGB and start its SDK server."), &mut said);
-                    retry_at = Instant::now() + RETRY;
+                    let text = match &mut source {
+                        Source::Own(host) if host.starting() => "starting OpenRGB (it looks through the PC's devices first, up to a minute)".to_string(),
+                        Source::Own(host) => {
+                            host.stop(); // starts again on the next round
+                            format!("Moni's OpenRGB isn't answering ({e}); restarting it")
+                        }
+                        Source::External(_) => format!("can't reach OpenRGB on {addr} ({e}). Open OpenRGB and start its SDK server."),
+                    };
+                    note(false, text, &mut said);
+                    retry_at = Instant::now() + Duration::from_secs(2);
                     continue;
                 }
             }
@@ -316,7 +439,8 @@ fn run(shared: Arc<Mutex<Shared>>, addr: &str) {
         }
         let c = client.as_mut().expect("connected above");
 
-        let stale = target.as_ref().map(|t| t.settings != settings).unwrap_or(true);
+        // (no device yet: look again when scan_at comes round)
+        let stale = target.as_ref().is_some_and(|t| t.settings != settings);
         if stale || scan_at <= Instant::now() {
             scan_at = Instant::now() + RESCAN;
             match setup(c, &settings, target.as_ref()) {
@@ -334,13 +458,14 @@ fn run(shared: Arc<Mutex<Shared>>, addr: &str) {
                 }
                 Ok(None) => {
                     let text = if settings.device.trim().is_empty() {
-                        "OpenRGB lists no devices".to_string()
+                        "OpenRGB found no RGB devices (yet)".to_string()
                     } else {
                         format!("OpenRGB has no device named like \"{}\"", settings.device.trim())
                     };
                     note(false, text, &mut said);
                     target = None;
-                    std::thread::sleep(RETRY);
+                    scan_at = Instant::now() + RETRY;
+                    std::thread::sleep(Duration::from_millis(250));
                     continue;
                 }
                 Err(e) => {
@@ -566,7 +691,7 @@ mod tests {
         let settings = Settings { enabled: true, leds_per_zone: 120, ..Settings::default() };
         let shared = Arc::new(Mutex::new(Shared { settings, ..Shared::default() }));
         let inner = shared.clone();
-        std::thread::spawn(move || run(inner, Box::leak(addr.into_boxed_str())));
+        std::thread::spawn(move || run(inner, Source::External(addr)));
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline && log.lock().unwrap().iter().filter(|(id, _)| *id == 1050).count() < 3 {
             std::thread::sleep(Duration::from_millis(20));
@@ -596,7 +721,7 @@ mod tests {
         drop(listener);
         let shared = Arc::new(Mutex::new(Shared { settings: Settings { enabled: true, ..Settings::default() }, ..Shared::default() }));
         let inner = shared.clone();
-        std::thread::spawn(move || run(inner, Box::leak(addr.into_boxed_str())));
+        std::thread::spawn(move || run(inner, Source::External(addr)));
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline && shared.lock().unwrap().note.is_empty() {
             std::thread::sleep(Duration::from_millis(20));

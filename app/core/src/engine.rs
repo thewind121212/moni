@@ -194,7 +194,8 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
     let stopping = Instant::now();
     serial.close("service stopping");
     if let Some(lights) = &lights {
-        lights.stop();
+        // LEDs off before Windows goes (the board keeps them lit when the PC is off)
+        lights.shutdown(Duration::from_millis(1500));
     }
     if let Some(feed) = &sampler.sensors {
         paths::log(&format!("stopping: sensor helper {}", feed.stop()));

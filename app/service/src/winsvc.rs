@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use windows_service::service::{
-    ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept, ServiceErrorControl,
-    ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState,
-    ServiceStatus, ServiceType,
+    PowerEventParam, ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
+    ServiceErrorControl, ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo,
+    ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -41,6 +41,17 @@ fn run_service() -> windows_service::Result<()> {
             }
             ServiceControlHandlerResult::NoError
         }
+        // The board keeps the fans' LEDs lit while the PC sleeps: off first (Windows
+        // gives a sleep notice about 2 s).
+        ServiceControl::PowerEvent(PowerEventParam::Suspend) => {
+            moni_core::lights::suspend(Duration::from_millis(1500));
+            ServiceControlHandlerResult::NoError
+        }
+        ServiceControl::PowerEvent(PowerEventParam::ResumeAutomatic | PowerEventParam::ResumeSuspend) => {
+            moni_core::lights::resume();
+            ServiceControlHandlerResult::NoError
+        }
+        ServiceControl::PowerEvent(_) => ServiceControlHandlerResult::NoError,
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
         _ => ServiceControlHandlerResult::NotImplemented,
     };
@@ -56,7 +67,7 @@ fn run_service() -> windows_service::Result<()> {
     };
     status.set_service_status(report(
         ServiceState::Running,
-        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN | ServiceControlAccept::POWER_EVENT,
     ))?;
 
     prepare_data_dir();
@@ -83,6 +94,7 @@ fn run_service() -> windows_service::Result<()> {
             if at.elapsed() > STOP_DEADLINE {
                 paths::log("stopping: still busy after 5 s, leaving anyway");
                 kill_matching("moni-sensors.exe");
+                moni_core::openrgb_host::kill_copies_of(&install_dir().join("openrgb").join("OpenRGB.exe"));
                 break;
             }
         }
@@ -170,10 +182,12 @@ fn install_pawnio() {
     }
 }
 
-/// The helper normally exits with the service; make sure before files are replaced.
+/// The helper and Moni's OpenRGB normally exit with the service; make sure
+/// before files are replaced.
 fn stop_helper() {
+    let openrgb = install_dir().join("openrgb").join("OpenRGB.exe");
     for _ in 0..20 {
-        if kill_matching("moni-sensors.exe") == 0 {
+        if kill_matching("moni-sensors.exe") + moni_core::openrgb_host::kill_copies_of(&openrgb) == 0 {
             return;
         }
         std::thread::sleep(Duration::from_millis(250));

@@ -8,6 +8,7 @@ pub mod gpu;
 pub mod hardware;
 pub mod lights;
 pub mod openrgb;
+pub mod openrgb_host;
 pub mod paths;
 pub mod sampler;
 pub mod transport;
