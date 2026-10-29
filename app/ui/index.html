@@ -113,6 +113,62 @@
       </section>
 
       <div class="side">
+        <section class="card" aria-labelledby="display-title">
+          <div class="card-head">
+            <h2 id="display-title">Digital display</h2>
+            <span class="pill" id="pill-display">…</span>
+          </div>
+
+          <label class="row toggle">
+            <span>
+              <strong>Feed the digital display</strong>
+              <small>The USB temperature display (5131:2007). Moni sends it CPU, GPU, RAM and the time from boot, so its own app isn't needed: quit it and turn off its start with Windows.</small>
+            </span>
+            <input type="checkbox" id="display-enabled">
+          </label>
+
+          <div class="row stack">
+            <strong>Temperature</strong>
+            <div class="segmented" role="radiogroup" aria-label="Temperature unit">
+              <label><input type="radio" name="display-unit" value="c"><span>°C</span></label>
+              <label><input type="radio" name="display-unit" value="f"><span>°F</span></label>
+            </div>
+          </div>
+
+          <details class="row">
+            <summary>Display options (experimental)</summary>
+            <p class="muted">Bytes the maker's app always sends the same; boards differ in what they do. Try them to see what changes on yours. The logo is part of the display itself: no setting turns it off.</p>
+            <div class="row stack">
+              <strong>Mode</strong>
+              <select id="display-mode">
+                <option value="0">0 · Temperature</option>
+                <option value="1">1 · Usage</option>
+                <option value="2">2 · Cycle</option>
+                <option value="3">3 · Cycle with RAM</option>
+              </select>
+            </div>
+            <div class="row stack">
+              <strong>Show</strong>
+              <div class="segmented" role="radiogroup" aria-label="CPU or GPU">
+                <label><input type="radio" name="display-source" value="cpu"><span>CPU</span></label>
+                <label><input type="radio" name="display-source" value="gpu"><span>GPU</span></label>
+              </div>
+            </div>
+            <div class="row stack">
+              <strong>Readings</strong>
+              <label class="radio"><input type="checkbox" class="display-item" value="1"> CPU temperature</label>
+              <label class="radio"><input type="checkbox" class="display-item" value="2"> CPU usage</label>
+              <label class="radio"><input type="checkbox" class="display-item" value="4"> GPU temperature</label>
+              <label class="radio"><input type="checkbox" class="display-item" value="8"> GPU usage</label>
+            </div>
+            <div class="row stack">
+              <strong>Seconds per page when cycling</strong>
+              <input type="text" id="display-cycle" inputmode="numeric" spellcheck="false" autocomplete="off">
+            </div>
+          </details>
+          <p class="muted" id="display-note"></p>
+        </section>
+
         <section class="card" aria-labelledby="lights-title">
           <div class="card-head">
             <h2 id="lights-title">Fan lights</h2>

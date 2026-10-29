@@ -27,7 +27,41 @@ function readForm() {
     interval_ms: Number($("interval").value),
     control_key: $("control-key").value.trim(),
     lights: readLights(),
+    display: readDisplay(),
   };
+}
+
+// ---------- digital display ----------
+
+function readDisplay() {
+  const cycle = Number($("display-cycle").value.trim());
+  const items = [...document.querySelectorAll(".display-item:checked")].reduce((sum, box) => sum + Number(box.value), 0);
+  return {
+    ...config.display,
+    enabled: $("display-enabled").checked,
+    fahrenheit: document.querySelector('input[name="display-unit"]:checked')?.value === "f",
+    mode: Number($("display-mode").value),
+    show_gpu: document.querySelector('input[name="display-source"]:checked')?.value === "gpu",
+    cycle: Number.isInteger(cycle) && cycle >= 1 && cycle <= 60 ? cycle : config.display.cycle,
+    items: items || 1,
+  };
+}
+
+function fillDisplay() {
+  const d = config.display;
+  $("display-enabled").checked = d.enabled;
+  for (const radio of document.querySelectorAll('input[name="display-unit"]')) radio.checked = radio.value === (d.fahrenheit ? "f" : "c");
+  $("display-mode").value = String(d.mode);
+  for (const radio of document.querySelectorAll('input[name="display-source"]')) radio.checked = radio.value === (d.show_gpu ? "gpu" : "cpu");
+  for (const box of document.querySelectorAll(".display-item")) box.checked = (d.items & Number(box.value)) !== 0;
+  $("display-cycle").value = String(d.cycle);
+}
+
+function renderDisplay(status) {
+  if (!config?.display.enabled) pill("pill-display", "Off");
+  else if (status.display_on) pill("pill-display", "On", "good");
+  else pill("pill-display", status.display_note?.startsWith("paused") ? "Paused" : "Not found", "warn");
+  $("display-note").textContent = config?.display.enabled && status.display_note !== "off" ? status.display_note : "";
 }
 
 // ---------- fan lights ----------
@@ -319,6 +353,7 @@ function fillForm() {
     $("interval").add(new Option(`Every ${config.interval_ms} ms`, String(config.interval_ms), true, true));
   }
   fillLights();
+  fillDisplay();
   syncVisibility();
 }
 
@@ -339,6 +374,7 @@ async function save() {
   try {
     config = await invoke("save_config", { config: next });
     $("lights-leds").value = String(config.lights.leds_per_zone); // (a bad number goes back to the saved one)
+    $("display-cycle").value = String(config.display.cycle);
     $("settings-error").hidden = true;
     $("saved").hidden = false;
     clearTimeout(savedTimer);
@@ -490,6 +526,7 @@ function renderStatus(view) {
   renderDiag(status);
   renderRestart(status);
   renderLights(status);
+  renderDisplay(status);
 }
 
 // "1792290000 restarted on COM3" -> shown for a minute after the click
@@ -511,6 +548,7 @@ function renderDiag(status) {
     ["Sensors", status.sensors_ok ? "LibreHardwareMonitor OK" : status.sensors_note || "–"],
     ["Turn off", status.control_on ? status.control_note : "off (no key)"],
     ["Fan lights", status.lights_note || "–"],
+    ["Digital display", status.display_note || "–"],
   ];
   $("diag").replaceChildren(
     ...rows.flatMap(([k, v]) => {
@@ -600,6 +638,10 @@ async function start() {
     radio.addEventListener("change", save);
   }
   $("wifi-target").addEventListener("change", save);
+  for (const node of document.querySelectorAll('#display-enabled, #display-mode, #display-cycle, .display-item, input[name="display-unit"], input[name="display-source"]')) {
+    node.addEventListener("change", save);
+  }
+  $("display-cycle").addEventListener("keydown", (e) => e.key === "Enter" && save());
   for (const id of ["lights-enabled", "lights-combo", "lights-brightness", "lights-speed", "lights-length", "lights-reverse", "lights-rainbow-load", "lights-comet-load", "lights-comet-level", "lights-leds", "lights-device", "lights-zones"]) {
     $(id).addEventListener("change", save);
   }

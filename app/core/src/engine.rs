@@ -4,6 +4,7 @@
 use crate::config::{Config, Transport};
 use crate::control;
 use crate::hardware::{self, Choices, SensorFeed};
+use crate::display::DisplayFeed;
 use crate::lights::Lights;
 use crate::paths;
 use crate::sampler::{Payload, Sampler};
@@ -39,6 +40,9 @@ pub struct Status {
     /// The fan lights: lighting now, and what they light or why not.
     pub lights_on: bool,
     pub lights_note: String,
+    /// The digital display: showing now, and what it's doing or why not.
+    pub display_on: bool,
+    pub display_note: String,
     pub ports: Vec<PortInfo>,
     pub sample: Option<Payload>,
 }
@@ -72,6 +76,7 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
     let control_key = Arc::new(Mutex::new(config.control_key.clone()));
     let control_note = (!options.preview).then(|| control::start(control_key.clone()));
     let lights = (!options.preview).then(|| Lights::start(config.lights.clone()));
+    let display = (!options.preview).then(|| DisplayFeed::start(config.display.clone()));
     paths::log(&format!("moni-service {VERSION} started ({:?})", config.transport));
     if let Some(note) = &control_note {
         paths::log(&format!("remote shutdown: {}", note.lock().unwrap()));
@@ -93,6 +98,9 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
                 if let Some(lights) = &lights {
                     lights.configure(&fresh.lights);
                 }
+                if let Some(display) = &display {
+                    display.configure(&fresh.display);
+                }
                 config = fresh;
             }
         }
@@ -104,6 +112,9 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
         });
         if let Some(lights) = &lights {
             lights.sample(payload.cpu);
+        }
+        if let Some(display) = &display {
+            display.sample(&payload);
         }
         let line = serde_json::to_string(&payload).unwrap_or_default();
         let control_on = control_note.is_some() && control::key_ok(&config.control_key);
@@ -144,6 +155,7 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
             }
             let sensor_error = sampler.sensors.as_ref().and_then(|feed| feed.error());
             let (lights_on, lights_note) = lights.as_ref().map(|l| l.status()).unwrap_or_default();
+            let (display_on, display_note) = display.as_ref().map(|d| d.status()).unwrap_or_default();
             let status = Status {
                 updated: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
                 version: VERSION.into(),
@@ -163,6 +175,8 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
                 control_note: control_note.as_ref().map(|n| n.lock().unwrap().clone()).unwrap_or_default(),
                 lights_on,
                 lights_note,
+                display_on,
+                display_note,
                 ports: ports.clone(),
                 sample: Some(payload),
             };
@@ -193,6 +207,9 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
     // stuck in a USB-serial or sensor-driver call can hold up a shutdown.
     let stopping = Instant::now();
     serial.close("service stopping");
+    if let Some(display) = &display {
+        display.stop();
+    }
     if let Some(lights) = &lights {
         // LEDs off before Windows goes (the board keeps them lit when the PC is off)
         lights.shutdown(Duration::from_millis(1500));

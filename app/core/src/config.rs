@@ -47,6 +47,31 @@ pub struct Config {
     pub control_key: String,
     /// The fans' ARGB lights through OpenRGB. See [`crate::lights`].
     pub lights: Lights,
+    /// The digital display (USB HID 5131:2007). See [`crate::display`].
+    pub display: Display,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Display {
+    /// On by default: it does nothing until the display is plugged in.
+    pub enabled: bool,
+    pub fahrenheit: bool,
+    /// Experimental, sent as the maker's app sends them (it never changes
+    /// them; boards differ in what they do): display mode (0 temperature,
+    /// 1 usage, 2 cycle, 3 cycle with RAM on some boards), CPU or GPU,
+    /// seconds per page when cycling, and which readings to show (1 CPU
+    /// temperature, 2 CPU usage, 4 GPU temperature, 8 GPU usage, added up).
+    pub mode: u8,
+    pub show_gpu: bool,
+    pub cycle: u8,
+    pub items: u8,
+}
+
+impl Default for Display {
+    fn default() -> Self {
+        Self { enabled: true, fahrenheit: false, mode: 0, show_gpu: false, cycle: 5, items: 1 }
+    }
 }
 
 /// What the fans show. See [`crate::lights::Effect`].
@@ -169,6 +194,7 @@ impl Default for Config {
             baud: 115_200,
             control_key: String::new(),
             lights: Lights::default(),
+            display: Display::default(),
         }
     }
 }
@@ -215,6 +241,10 @@ impl Config {
         lights.device = lights.device.trim().to_string();
         lights.zones = lights.zones.trim().to_string();
         lights.leds_per_zone = lights.leds_per_zone.min(1024);
+        let display = &mut self.display;
+        display.mode = display.mode.min(3);
+        display.cycle = display.cycle.clamp(1, 60);
+        display.items = if display.items == 0 { 1 } else { display.items.min(15) };
         self
     }
 

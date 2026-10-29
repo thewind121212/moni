@@ -85,6 +85,17 @@ no Python and no separate LibreHardwareMonitor window:
   - Code: `app/core/src/lights.rs` (effect), `openrgb.rs` (SDK client),
     `openrgb_host.rs` (the bundled OpenRGB).
 
+- **Digital display** (on by default; idle until one is plugged in): the
+  service feeds the USB temperature display (HID 5131:2007, the one JONSBO
+  PC Monitor drives) from boot, so that Electron app isn't needed. It sends
+  what that app sends (protocol read from its `device_hid.js`): one 64-byte
+  report every 200 ms with CPU / GPU temperature, usage, clock, power, the
+  CPU fan, RAM, disk and the time, in the layout the display's HID usage
+  page calls for. °C or °F; the maker's display-mode bytes are under
+  *Display options (experimental)*. While JONSBO PC Monitor runs, Moni
+  pauses and says so. The logo is part of the display: nothing turns it off.
+  Code: `app/core/src/display.rs`.
+
 Get the installer from the latest **Windows app** workflow run (Actions tab →
 artifact `Moni-windows-x64`) or from a GitHub release, run it, and approve the
 admin prompt. Windows SmartScreen warns about unsigned installers: choose
