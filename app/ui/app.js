@@ -48,12 +48,34 @@ const COMBOS = [
   ["Blue & Purple", [0, 70, 255], [140, 0, 255], [220, 0, 255]],
 ];
 
+// Static: quick picks beside "any color".
+const SWATCHES = ["#ff0000", "#ff5a00", "#ffc800", "#00ff3c", "#00ffd0", "#00b4ff", "#0046ff", "#8c00ff", "#ff00c8", "#ff0050", "#ffffff"];
+const SPECTRUM = ["#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff", "#ff0000"];
+const RAINBOW_MAX = 8; // (core/src/config.rs RAINBOW_COLORS_MAX)
+const RAINBOW_RATE = 24; // LEDs a second at Speed 100 % (core/src/lights.rs)
+const PREVIEW_LEDS = 120; // the preview bar stands for this many LEDs
+const hex = (c) => "#" + c.map((v) => v.toString(16).padStart(2, "0")).join("");
+const comboColors = ([, low, mid, high]) => [low, mid, high].filter(Boolean).map(hex);
+
+// Rainbow: the user's own colors, kept while "Full rainbow" is picked so
+// switching back finds them again.
+let ownColors = ["#ff0080", "#8c00ff", "#00c8ff"];
+
+const lightsMode = () => document.querySelector('input[name="lights-mode"]:checked')?.value ?? "load";
+const paletteOwn = () => document.querySelector('input[name="lights-palette"]:checked')?.value === "own";
+
 function readLights() {
   const leds = Number($("lights-leds").value.trim());
   return {
     ...config.lights,
     enabled: $("lights-enabled").checked,
+    mode: lightsMode(),
     combo: Number($("lights-combo").value),
+    color: $("lights-color").value,
+    rainbow: paletteOwn() ? ownColors.slice(0, RAINBOW_MAX) : [],
+    rainbow_length: Number($("lights-length").value),
+    reverse: $("lights-reverse").checked,
+    rainbow_load: $("lights-rainbow-load").checked,
     brightness: Number($("lights-brightness").value),
     speed: Number($("lights-speed").value),
     leds_per_zone: Number.isInteger(leds) && leds >= 0 ? leds : config.lights.leds_per_zone,
@@ -66,7 +88,16 @@ function fillLights() {
   const l = config.lights;
   $("lights-combo").replaceChildren(...COMBOS.map(([name], i) => new Option(`${i + 1}. ${name}`, String(i + 1))));
   $("lights-enabled").checked = l.enabled;
+  for (const radio of document.querySelectorAll('input[name="lights-mode"]')) radio.checked = radio.value === l.mode;
   $("lights-combo").value = String(l.combo);
+  $("lights-color").value = l.color;
+  if (l.rainbow.length) ownColors = [...l.rainbow];
+  for (const radio of document.querySelectorAll('input[name="lights-palette"]')) {
+    radio.checked = radio.value === (l.rainbow.length ? "own" : "spectrum");
+  }
+  $("lights-length").value = String(l.rainbow_length);
+  $("lights-reverse").checked = l.reverse;
+  $("lights-rainbow-load").checked = l.rainbow_load;
   $("lights-brightness").value = String(l.brightness);
   $("lights-speed").value = String(l.speed);
   $("lights-leds").value = String(l.leds_per_zone);
@@ -75,13 +106,148 @@ function fillLights() {
   showLights();
 }
 
-function showLights() {
-  const [, low, mid, high] = COMBOS[Number($("lights-combo").value) - 1] ?? COMBOS[11];
-  const stops = [low, mid, high].filter(Boolean).map((c) => `rgb(${c.join(",")})`);
-  $("lights-preview").style.background = `linear-gradient(90deg, ${stops.join(", ")})`;
+// The static swatches, the rainbow's own colors (each editable and
+// removable, up to 8) and the palettes that fill them in one click.
+function fillSwatches() {
+  const color = $("lights-color").value;
+  const swatches = SWATCHES.map((c) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "swatch";
+    b.style.setProperty("--c", c);
+    b.title = c;
+    b.setAttribute("aria-label", `Color ${c}`);
+    b.setAttribute("aria-pressed", String(c === color));
+    b.addEventListener("click", () => {
+      $("lights-color").value = c;
+      changed();
+    });
+    return b;
+  });
+  $("lights-swatches").replaceChildren(...swatches, $("lights-color"));
+
+  const own = paletteOwn();
+  $("lights-rainbow").hidden = !own;
+  $("lights-palettes").hidden = !own;
+  if (!own) return;
+  const items = ownColors.map((c, i) => {
+    const wrap = document.createElement("span");
+    wrap.className = "own";
+    const input = document.createElement("input");
+    input.type = "color";
+    input.value = c;
+    input.title = `Color ${i + 1}`;
+    input.addEventListener("input", () => {
+      ownColors[i] = input.value;
+      showLights(false);
+      saveSoon();
+    });
+    wrap.append(input);
+    if (ownColors.length > 2) {
+      const x = document.createElement("button");
+      x.type = "button";
+      x.textContent = "×";
+      x.title = "Remove this color";
+      x.addEventListener("click", () => {
+        ownColors.splice(i, 1);
+        changed();
+      });
+      wrap.append(x);
+    }
+    return wrap;
+  });
+  if (ownColors.length < RAINBOW_MAX) {
+    const add = document.createElement("button");
+    add.type = "button";
+    add.textContent = "+ Add";
+    add.addEventListener("click", () => {
+      ownColors.push(ownColors.at(-1) ?? "#ffffff");
+      changed();
+    });
+    items.push(add);
+  }
+  $("lights-rainbow").replaceChildren(...items);
+
+  $("lights-palettes").replaceChildren(
+    ...COMBOS.map((combo) => {
+      const colors = comboColors(combo);
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "palette";
+      b.textContent = combo[0];
+      b.title = `Use ${combo[0]}'s colors`;
+      b.style.setProperty("--g", `linear-gradient(90deg, ${colors.join(", ")})`);
+      b.addEventListener("click", () => {
+        ownColors = colors;
+        changed();
+      });
+      return b;
+    }),
+  );
+}
+
+// A click that changes the colors: show it and save.
+function changed() {
+  showLights();
+  save();
+}
+
+// Color pickers fire while dragging: save once they settle, so the fans
+// follow along without a file write per pixel.
+let saveTimer = 0;
+function saveSoon() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, 200);
+}
+
+// The rainbow's colors once round, back to the first.
+const loopColors = () => (paletteOwn() ? [...ownColors, ownColors[0]] : SPECTRUM);
+
+function showLights(redraw = true) {
+  const mode = lightsMode();
+  for (const row of document.querySelectorAll("[data-mode]")) row.hidden = !row.dataset.mode.split(" ").includes(mode);
+  if (redraw) fillSwatches();
+  const preview = $("lights-preview");
+  preview.style.filter = `brightness(${0.35 + 0.65 * (Number($("lights-brightness").value) / 100)})`;
+  if (mode === "static") {
+    preview.style.background = $("lights-color").value;
+  } else if (mode === "rainbow") {
+    preview.style.background = `linear-gradient(90deg, ${loopColors().join(", ")})`;
+    preview.style.backgroundSize = `${(Number($("lights-length").value) / PREVIEW_LEDS) * 100}% 100%`;
+    preview.style.backgroundRepeat = "repeat-x";
+  } else {
+    preview.style.background = `linear-gradient(90deg, ${comboColors(COMBOS[Number($("lights-combo").value) - 1] ?? COMBOS[11]).join(", ")})`;
+  }
   $("lights-brightness-value").textContent = `${$("lights-brightness").value} %`;
   $("lights-speed-value").textContent = `${$("lights-speed").value} %`;
+  $("lights-length-value").textContent = `${$("lights-length").value} LEDs`;
+  $("lights-speed-hint").textContent =
+    mode === "rainbow" ? `${Math.round((RAINBOW_RATE * Number($("lights-speed").value)) / 100)} LEDs a second.` : "100 % is cpu_rgb.py's speed. Lower is calmer.";
+  if (mode === "rainbow") runPreview();
 }
+
+// The rainbow preview runs like the fans do (same speed and direction).
+let previewAt = 0;
+let previewFrame = 0;
+function runPreview() {
+  if (previewFrame) return;
+  let last = performance.now();
+  const tick = (now) => {
+    const preview = $("lights-preview");
+    if (lightsMode() !== "rainbow" || document.hidden) {
+      previewFrame = 0;
+      return;
+    }
+    const width = preview.clientWidth;
+    const speed = (RAINBOW_RATE * Number($("lights-speed").value)) / 100;
+    previewAt += ((now - last) / 1000) * speed * (width / PREVIEW_LEDS) * ($("lights-reverse").checked ? -1 : 1);
+    last = now;
+    preview.style.backgroundPosition = `${previewAt}px 0`;
+    previewFrame = requestAnimationFrame(tick);
+  };
+  previewFrame = requestAnimationFrame(tick);
+}
+document.addEventListener("visibilitychange", () => !document.hidden && lightsMode() === "rainbow" && runPreview());
 
 function renderLights(status) {
   const enabled = config?.lights.enabled;
@@ -388,10 +554,18 @@ async function start() {
     radio.addEventListener("change", save);
   }
   $("wifi-target").addEventListener("change", save);
-  for (const id of ["lights-enabled", "lights-combo", "lights-brightness", "lights-speed", "lights-leds", "lights-device", "lights-zones"]) {
+  for (const id of ["lights-enabled", "lights-combo", "lights-brightness", "lights-speed", "lights-length", "lights-reverse", "lights-rainbow-load", "lights-leds", "lights-device", "lights-zones"]) {
     $(id).addEventListener("change", save);
   }
-  for (const id of ["lights-combo", "lights-brightness", "lights-speed"]) $(id).addEventListener("input", showLights);
+  for (const id of ["lights-combo", "lights-brightness", "lights-speed", "lights-length"]) $(id).addEventListener("input", () => showLights(false));
+  for (const radio of document.querySelectorAll('input[name="lights-mode"], input[name="lights-palette"]')) {
+    radio.addEventListener("change", changed);
+  }
+  $("lights-color").addEventListener("input", () => {
+    showLights(false);
+    saveSoon();
+  });
+  $("lights-color").addEventListener("change", () => showLights());
   for (const id of ["lights-leds", "lights-device", "lights-zones"]) {
     $(id).addEventListener("keydown", (e) => e.key === "Enter" && save());
   }
