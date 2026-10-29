@@ -113,6 +113,58 @@
       </section>
 
       <div class="side">
+        <section class="card" aria-labelledby="lights-title">
+          <div class="card-head">
+            <h2 id="lights-title">Fan lights</h2>
+            <span class="pill" id="pill-lights">Off</span>
+          </div>
+
+          <label class="row toggle">
+            <span>
+              <strong>Glow with CPU load</strong>
+              <small>Through OpenRGB: keep it open with SDK Server started. Stop cpu_rgb.py and OpenRGB's own effects first, or they fight and flicker.</small>
+            </span>
+            <input type="checkbox" id="lights-enabled">
+          </label>
+
+          <div class="row stack">
+            <strong>Colors</strong>
+            <select id="lights-combo"></select>
+            <div class="lights-preview" id="lights-preview" aria-hidden="true"></div>
+          </div>
+
+          <div class="row stack">
+            <strong>Brightness <span class="muted" id="lights-brightness-value"></span></strong>
+            <input type="range" id="lights-brightness" min="5" max="100" step="5">
+          </div>
+
+          <div class="row stack">
+            <strong>Speed <span class="muted" id="lights-speed-value"></span></strong>
+            <input type="range" id="lights-speed" min="25" max="200" step="5">
+            <small>100 % is cpu_rgb.py's speed. Lower is calmer.</small>
+          </div>
+
+          <div class="row stack">
+            <strong>LEDs per header</strong>
+            <input type="text" id="lights-leds" inputmode="numeric" spellcheck="false" autocomplete="off">
+            <small>OpenRGB guesses 10 for an ARGB header; your Jonsbo ZA fans need 120. 0 leaves OpenRGB's sizes alone.</small>
+          </div>
+
+          <details class="row">
+            <summary>Device and zones</summary>
+            <div class="row stack">
+              <strong>Device</strong>
+              <input type="text" id="lights-device" placeholder="Auto (the motherboard)" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="row stack">
+              <strong>Zones</strong>
+              <input type="text" id="lights-zones" placeholder="All, or e.g. ARGB_V2_1, ARGB_V2_2, ARGB_V2_3" spellcheck="false" autocomplete="off">
+              <small>Names as OpenRGB shows them, separated by commas.</small>
+            </div>
+          </details>
+          <p class="muted" id="lights-note"></p>
+        </section>
+
         <section class="card" aria-labelledby="fw-title">
           <div class="card-head"><h2 id="fw-title">Clock firmware</h2></div>
           <p class="muted" id="fw-info">Plug the clock in over USB, then update.</p>

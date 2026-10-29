@@ -194,3 +194,9 @@ details summary { cursor: pointer; color: var(--muted); }
 @media (max-width: 480px) {
   .top, main { padding-left: 16px; padding-right: 16px; }
 }
+
+/* Fan lights */
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+.lights-preview { height: 10px; border-radius: 999px; background: var(--surface-2); }
+details.row > .row:first-of-type { border-top: 0; }
+#lights-note { margin: 8px 0 0; overflow-wrap: anywhere; }
