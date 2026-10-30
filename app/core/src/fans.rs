@@ -137,12 +137,22 @@ impl FanControl {
     /// One sample: the commands to send. `cpu` / `gpu`: raw temperatures, °C
     /// (0 or less: no sensor). `paused`: another fan program is running.
     pub fn step(&mut self, s: &Settings, cpu: f64, gpu: f64, dt: f64, paused: Option<&str>) -> Vec<Command> {
+        if self.identify.as_ref().is_some_and(|(_, at)| at.elapsed() >= IDENTIFY) {
+            self.identify = None;
+        }
+        // Identify spins any header, in a group or not, fan control on or off.
+        let identifying = self.identify.as_ref().map(|(id, _)| id.clone());
         if !s.enabled || paused.is_some() {
             self.note = match paused {
                 Some(why) if s.enabled => format!("paused: {why}"),
                 _ => "off: the BIOS runs the fans".into(),
             };
-            return self.release();
+            let mut out: Vec<Command> = self.release().into_iter().filter(|c| Some(c) != identifying.clone().map(Command::Default).as_ref()).collect();
+            if let Some(id) = identifying {
+                self.taken.insert(id.clone());
+                out.push(Command::Set(id, 100.0));
+            }
+            return out;
         }
         let dt = dt.clamp(0.0, 5.0);
         let (cpu_raw, gpu_raw) = ((cpu > 0.0).then_some(cpu), (gpu > 0.0).then_some(gpu));
@@ -150,9 +160,6 @@ impl FanControl {
         let gpu_t = gpu_raw.map(|t| self.gpu.feed(t, dt, GPU_SMOOTH, s.hysteresis));
         let hot = cpu_raw.is_some_and(|t| t >= CPU_HOT) || gpu_raw.is_some_and(|t| t >= GPU_HOT);
         let wanted = role_speeds(s, cpu_t, gpu_t);
-        if self.identify.as_ref().is_some_and(|(_, at)| at.elapsed() >= IDENTIFY) {
-            self.identify = None;
-        }
 
         let mut out = Vec::new();
         let mut used = HashSet::new();
@@ -178,6 +185,12 @@ impl FanControl {
             self.taken.insert(group.control.clone());
             out.push(Command::Set(group.control.clone(), speed.round()));
         }
+        // A header in no group being identified: 100 % for now.
+        if let Some(id) = identifying.filter(|id| !used.contains(id)) {
+            self.taken.insert(id.clone());
+            used.insert(id.clone());
+            out.push(Command::Set(id, 100.0));
+        }
         // Headers no group uses any more go back to the BIOS.
         let dropped: Vec<String> = self.taken.iter().filter(|id| !used.contains(*id)).cloned().collect();
         for id in dropped {
@@ -188,7 +201,7 @@ impl FanControl {
 
         self.note = if hot {
             "too hot: every fan at 100 %".into()
-        } else if used.is_empty() {
+        } else if s.groups.iter().all(|g| g.control.is_empty() || g.role == FanRole::Bios) {
             "on, but no group has a header yet: pick one for each".into()
         } else {
             let fmt = |t: Option<f64>| t.map(|t| format!("{t:.0} °C")).unwrap_or_else(|| "–".into());
@@ -337,6 +350,24 @@ mod tests {
         let out = f.step(&s, 40.0, 40.0, 1.0, None);
         assert_eq!(set(&out, "side"), 100.0);
         assert_eq!(set(&out, "bottom"), 40.0);
+    }
+
+    #[test]
+    fn identify_works_on_any_header_even_with_fan_control_off() {
+        let off = Fans::default(); // (no headers picked, switched off)
+        let mut f = FanControl::default();
+        f.identify("/lpc/it8696e/0/control/4");
+        let out = f.step(&off, 40.0, 40.0, 1.0, None);
+        assert_eq!(out, vec![Command::Set("/lpc/it8696e/0/control/4".into(), 100.0)]);
+        f.identify = Some(("/lpc/it8696e/0/control/4".into(), Instant::now() - IDENTIFY));
+        assert_eq!(f.step(&off, 40.0, 40.0, 1.0, None), vec![Command::Default("/lpc/it8696e/0/control/4".into())], "then back to the BIOS");
+        // On, with that header in no group: spun, then given back.
+        let on = mine();
+        f.step(&on, 40.0, 40.0, 1.0, None);
+        f.identify("/lpc/it8696e/0/control/5");
+        assert!(f.step(&on, 40.0, 40.0, 1.0, None).contains(&Command::Set("/lpc/it8696e/0/control/5".into(), 100.0)));
+        f.identify = Some(("/lpc/it8696e/0/control/5".into(), Instant::now() - IDENTIFY));
+        assert!(f.step(&on, 40.0, 40.0, 1.0, None).contains(&Command::Default("/lpc/it8696e/0/control/5".into())));
     }
 
     #[test]

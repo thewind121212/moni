@@ -91,8 +91,14 @@ function showFanValues() {
   $("fans-hysteresis-value").textContent = `${$("fans-hysteresis").value} °C`;
 }
 
+// "Fan #5 · 2083 rpm · BIOS": the header's own fan (same index on the chip)
+// and who runs it now (the BIOS reports no value: the helper sends 0).
+let fanRpms = {};
 function controlLabel(row) {
-  return `${row.name} · ${row.hw} · ${fmt(row.value)} %`;
+  const rpm = fanRpms[row.id.replace("/control/", "/fan/")];
+  const fan = rpm == null ? "" : rpm > 0 ? ` · ${Math.round(rpm)} rpm` : " · no fan";
+  const who = fanSpeeds[row.id] != null ? `Moni ${Math.round(fanSpeeds[row.id])} %` : row.value > 0 ? `${Math.round(row.value)} %` : "BIOS";
+  return `${row.name}${fan} · ${who}`;
 }
 
 function renderFanGroups() {
@@ -112,13 +118,20 @@ function renderFanGroups() {
       role.setAttribute("aria-label", "What it follows");
       role.replaceChildren(...FAN_ROLES.map(([v, label]) => new Option(label, v)));
       role.value = g.role;
-      role.addEventListener("change", () => ((fanGroups[i].role = role.value), save(), renderFanGroups()));
+      // (blur: a focused select changes with the mouse wheel on Windows, and
+      // scrolling the page would pick another option and save it)
+      role.addEventListener("change", () => (role.blur(), (fanGroups[i].role = role.value), save(), renderFanGroups()));
       const header = document.createElement("select");
       header.className = "fan-header";
       header.dataset.group = String(i);
       header.setAttribute("aria-label", "Fan header");
       fillHeaderOptions(header, g.control);
-      header.addEventListener("change", () => ((fanGroups[i].control = header.value), save()));
+      header.addEventListener("change", () => {
+        header.blur();
+        fanGroups[i].control = header.value;
+        identify.disabled = !header.value;
+        save();
+      });
       const min = Object.assign(document.createElement("input"), { type: "text", value: String(g.min), className: "fan-min", inputMode: "numeric", title: "Minimum %" });
       min.setAttribute("aria-label", "Minimum speed, %");
       min.disabled = g.role === "pump";
@@ -128,7 +141,7 @@ function renderFanGroups() {
         min.value = String(fanGroups[i].min);
         save();
       });
-      const identify = Object.assign(document.createElement("button"), { textContent: "Identify", title: "Spin this header to 100 % for 6 s" });
+      var identify = Object.assign(document.createElement("button"), { textContent: "Identify", title: "Spin this header to 100 % for 6 s (works with fan control off too)" });
       identify.disabled = !g.control;
       identify.addEventListener("click", async () => {
         identify.disabled = true;
@@ -155,7 +168,8 @@ function fillHeaderOptions(select, value) {
 
 function updateFanControls(rows) {
   fanControls = rows.filter((r) => r.type.toLowerCase() === "control" && !r.id.toLowerCase().includes("/gpu"));
-  const key = JSON.stringify(fanControls.map((r) => [r.id, Math.round(r.value)]));
+  fanRpms = Object.fromEntries(rows.filter((r) => r.type.toLowerCase() === "fan").map((r) => [r.id, r.value]));
+  const key = JSON.stringify([fanControls.map((r) => [r.id, Math.round(r.value)]), Object.values(fanRpms).map((v) => Math.round(v / 50)), fanSpeeds]);
   if (key === fanControlsKey) return;
   fanControlsKey = key;
   for (const select of document.querySelectorAll(".fan-header")) {
