@@ -5,6 +5,7 @@ pub mod config;
 pub mod control;
 pub mod display;
 pub mod engine;
+pub mod fans;
 pub mod gpu;
 pub mod hardware;
 pub mod lights;

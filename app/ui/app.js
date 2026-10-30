@@ -28,7 +28,160 @@ function readForm() {
     control_key: $("control-key").value.trim(),
     lights: readLights(),
     display: readDisplay(),
+    fans: readFans(),
   };
+}
+
+// ---------- fan control ----------
+
+const FAN_ROLES = [
+  ["cpu", "CPU curve"],
+  ["intake", "Intake"],
+  ["exhaust", "Exhaust"],
+  ["pump", "Pump (100 %)"],
+  ["bios", "Leave to the BIOS"],
+];
+let fanGroups = [];
+let fanControls = []; // the board's fan control sensors (LibreHardwareMonitor "Control" rows)
+let fanControlsKey = "";
+let fanSpeeds = {}; // control id -> % Moni sets now
+
+function readFans() {
+  const point = (id, i, k) => Number($(`${id}-${i}-${k}`)?.value);
+  const curve = (id, old) =>
+    old.map((p, i) => [point(id, i, "t"), point(id, i, "p")]).map(([t, p], i) => (Number.isFinite(t) && Number.isFinite(p) ? [t, p] : old[i]));
+  return {
+    ...config.fans,
+    enabled: $("fans-enabled").checked,
+    groups: fanGroups.map((g) => ({ ...g })),
+    cpu_curve: curve("curve-cpu", config.fans.cpu_curve),
+    gpu_curve: curve("curve-gpu", config.fans.gpu_curve),
+    intake_offset: Number($("fans-offset").value),
+    hysteresis: Number($("fans-hysteresis").value),
+  };
+}
+
+function fillFans() {
+  const f = config.fans;
+  $("fans-enabled").checked = f.enabled;
+  fanGroups = f.groups.map((g) => ({ ...g }));
+  $("fans-offset").value = String(f.intake_offset);
+  $("fans-hysteresis").value = String(f.hysteresis);
+  fillCurve("curve-cpu", f.cpu_curve);
+  fillCurve("curve-gpu", f.gpu_curve);
+  renderFanGroups();
+  showFanValues();
+}
+
+function fillCurve(id, points) {
+  $(id).replaceChildren(
+    ...points.map(([t, p], i) => {
+      const label = document.createElement("label");
+      const temp = Object.assign(document.createElement("input"), { type: "text", id: `${id}-${i}-t`, value: String(t), inputMode: "decimal" });
+      const pct = Object.assign(document.createElement("input"), { type: "text", id: `${id}-${i}-p`, value: String(p), inputMode: "decimal" });
+      for (const input of [temp, pct]) input.addEventListener("change", save);
+      label.append(temp, "°C →", pct, "%");
+      return label;
+    }),
+  );
+}
+
+function showFanValues() {
+  $("fans-offset-value").textContent = `${$("fans-offset").value} %`;
+  $("fans-hysteresis-value").textContent = `${$("fans-hysteresis").value} °C`;
+}
+
+function controlLabel(row) {
+  return `${row.name} · ${row.hw} · ${fmt(row.value)} %`;
+}
+
+function renderFanGroups() {
+  $("fan-groups").replaceChildren(
+    ...fanGroups.map((g, i) => {
+      const box = document.createElement("div");
+      box.className = "fan-group";
+      const name = Object.assign(document.createElement("input"), { type: "text", value: g.name, className: "fan-name", spellcheck: false });
+      name.setAttribute("aria-label", "Group name");
+      name.addEventListener("change", () => ((fanGroups[i].name = name.value.trim()), save()));
+      const speed = document.createElement("span");
+      speed.className = "fan-speed";
+      speed.id = `fan-speed-${i}`;
+      const line = document.createElement("div");
+      line.className = "fan-line";
+      const role = document.createElement("select");
+      role.setAttribute("aria-label", "What it follows");
+      role.replaceChildren(...FAN_ROLES.map(([v, label]) => new Option(label, v)));
+      role.value = g.role;
+      role.addEventListener("change", () => ((fanGroups[i].role = role.value), save(), renderFanGroups()));
+      const header = document.createElement("select");
+      header.className = "fan-header";
+      header.dataset.group = String(i);
+      header.setAttribute("aria-label", "Fan header");
+      fillHeaderOptions(header, g.control);
+      header.addEventListener("change", () => ((fanGroups[i].control = header.value), save()));
+      const min = Object.assign(document.createElement("input"), { type: "text", value: String(g.min), className: "fan-min", inputMode: "numeric", title: "Minimum %" });
+      min.setAttribute("aria-label", "Minimum speed, %");
+      min.disabled = g.role === "pump";
+      min.addEventListener("change", () => {
+        const n = Number(min.value);
+        if (Number.isInteger(n) && n >= 20 && n <= 100) fanGroups[i].min = n;
+        min.value = String(fanGroups[i].min);
+        save();
+      });
+      const identify = Object.assign(document.createElement("button"), { textContent: "Identify", title: "Spin this header to 100 % for 6 s" });
+      identify.disabled = !g.control;
+      identify.addEventListener("click", async () => {
+        identify.disabled = true;
+        try {
+          await invoke("identify_fan", { control: fanGroups[i].control });
+        } catch (error) {
+          $("settings-error").textContent = String(error);
+          $("settings-error").hidden = false;
+        }
+        setTimeout(() => (identify.disabled = !fanGroups[i].control), 6000);
+      });
+      line.append(role, header, "min", min, "%", identify);
+      box.append(name, speed, line);
+      return box;
+    }),
+  );
+  showFanSpeeds();
+}
+
+function fillHeaderOptions(select, value) {
+  const options = [["", "No header yet"]].concat(fanControls.map((r) => [r.id, controlLabel(r)]));
+  setOptions(select, options, value);
+}
+
+function updateFanControls(rows) {
+  fanControls = rows.filter((r) => r.type.toLowerCase() === "control" && !r.id.toLowerCase().includes("/gpu"));
+  const key = JSON.stringify(fanControls.map((r) => [r.id, Math.round(r.value)]));
+  if (key === fanControlsKey) return;
+  fanControlsKey = key;
+  for (const select of document.querySelectorAll(".fan-header")) {
+    if (document.activeElement === select) continue;
+    fillHeaderOptions(select, fanGroups[Number(select.dataset.group)]?.control ?? "");
+  }
+}
+
+function showFanSpeeds() {
+  fanGroups.forEach((g, i) => {
+    const node = $(`fan-speed-${i}`);
+    if (!node) return;
+    const pct = g.control ? fanSpeeds[g.control] : undefined;
+    node.textContent = !g.control ? "no header" : pct == null ? "BIOS" : `${Math.round(pct)} %`;
+  });
+}
+
+function renderFans(status) {
+  fanSpeeds = Object.fromEntries((status.fans ?? []).filter((f) => f.speed != null).map((f) => [f.control, f.speed]));
+  showFanSpeeds();
+  const note = status.fans_note || "";
+  if (!config?.fans.enabled) pill("pill-fans", "Off");
+  else if (note.startsWith("on:")) pill("pill-fans", "On", "good");
+  else if (note.startsWith("too hot")) pill("pill-fans", "Full speed", "bad");
+  else pill("pill-fans", note.startsWith("paused") ? "Paused" : "Waiting", "warn");
+  $("fans-note").textContent = config?.fans.enabled ? note : "";
 }
 
 // ---------- digital display ----------
@@ -354,6 +507,7 @@ function fillForm() {
   }
   fillLights();
   fillDisplay();
+  fillFans();
   syncVisibility();
 }
 
@@ -407,6 +561,7 @@ function updatePorts(ports) {
 async function updateFans() {
   const rows = await invoke("get_sensors");
   renderSensors(rows);
+  updateFanControls(rows);
   const fans = rows.filter((r) => r.type.toLowerCase() === "fan" && !r.id.toLowerCase().includes("/gpu"));
   const key = JSON.stringify(fans.map((f) => f.id));
   if (key !== fansKey && document.activeElement !== $("fan-sensor")) {
@@ -527,6 +682,7 @@ function renderStatus(view) {
   renderRestart(status);
   renderLights(status);
   renderDisplay(status);
+  renderFans(status);
 }
 
 // "1792290000 restarted on COM3" -> shown for a minute after the click
@@ -549,6 +705,7 @@ function renderDiag(status) {
     ["Turn off", status.control_on ? status.control_note : "off (no key)"],
     ["Fan lights", status.lights_note || "–"],
     ["Digital display", status.display_note || "–"],
+    ["Fan control", status.fans_note || "–"],
   ];
   $("diag").replaceChildren(
     ...rows.flatMap(([k, v]) => {
@@ -568,7 +725,7 @@ function renderSensors(rows) {
   }
   const table = document.createElement("table");
   for (const r of rows) {
-    if (!["temperature", "fan", "power", "clock", "load", "throughput"].includes(r.type.toLowerCase())) continue;
+    if (!["temperature", "fan", "control", "power", "clock", "load", "throughput"].includes(r.type.toLowerCase())) continue;
     const tr = table.insertRow();
     tr.insertCell().textContent = r.type;
     const v = tr.insertCell();
@@ -638,6 +795,8 @@ async function start() {
     radio.addEventListener("change", save);
   }
   $("wifi-target").addEventListener("change", save);
+  for (const id of ["fans-enabled", "fans-offset", "fans-hysteresis"]) $(id).addEventListener("change", save);
+  for (const id of ["fans-offset", "fans-hysteresis"]) $(id).addEventListener("input", showFanValues);
   for (const node of document.querySelectorAll('#display-enabled, #display-mode, #display-cycle, .display-item, input[name="display-unit"], input[name="display-source"]')) {
     node.addEventListener("change", save);
   }

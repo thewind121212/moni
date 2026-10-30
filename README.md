@@ -96,6 +96,24 @@ no Python and no separate LibreHardwareMonitor window:
   pauses and says so. The logo is part of the display: nothing turns it off.
   Code: `app/core/src/display.rs`.
 
+- **Fan control** (off until switched on): the service runs the board's fan
+  headers by curve from boot, in place of Gigabyte Control Center, through
+  the sensor helper (LibreHardwareMonitor sets the headers; the helper takes
+  `set <control> <percent>` / `default <control>` lines on stdin). Groups
+  (default: the owner's PC: radiator on top out, bottom and side in, rear
+  out, pump), each on a header picked in the app (*Identify* spins one to
+  100 % for 6 s):
+  - CPU fans follow the CPU curve; intakes the higher of the GPU curve and
+    the CPU fans' speed, plus an offset (10 %), so the case stays at positive
+    pressure and dust only gets in through the filters; exhausts the higher
+    of the two; a pump 100 %.
+  - Smoothed temperatures with hysteresis (3 °C), speeds up 10 %/s and down
+    3 %/s, a minimum per group, 100 % at 90 °C CPU or 85 °C GPU, 80 % with
+    no CPU temperature.
+  - Off, paused (while FanControl or Gigabyte Control Center runs), or when
+    the service stops or dies, every header goes back to the BIOS curves.
+  - Code: `app/core/src/fans.rs`, `app/sensors/Program.cs`.
+
 Get the installer from the latest **Windows app** workflow run (Actions tab →
 artifact `Moni-windows-x64`) or from a GitHub release, run it, and approve the
 admin prompt. Windows SmartScreen warns about unsigned installers: choose

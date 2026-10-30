@@ -3,7 +3,7 @@
 //! values the clock shows, using the same scoring as host/monitor_windows.py.
 
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +31,9 @@ struct Line {
     rows: Option<Vec<Row>>,
     #[serde(default)]
     error: Option<String>,
+    /// A fan command the helper couldn't carry out.
+    #[serde(default)]
+    fan_error: Option<String>,
 }
 
 #[derive(Default)]
@@ -38,6 +41,7 @@ struct Latest {
     rows: Vec<Row>,
     at: Option<Instant>,
     error: Option<String>,
+    fan_error: Option<(String, Instant)>,
 }
 
 /// Owns the helper process and restarts it whenever it exits, until [`SensorFeed::stop`].
@@ -89,6 +93,20 @@ impl SensorFeed {
             Some(at) if at.elapsed() < Duration::from_secs(5) => latest.rows.clone(),
             _ => Vec::new(),
         }
+    }
+
+    /// One fan command for the helper (`set <control id> <percent>` or
+    /// `default <control id>`). False when the helper isn't running.
+    pub fn command(&self, line: &str) -> bool {
+        let mut slot = self.child.lock().unwrap();
+        let Some(stdin) = slot.as_mut().and_then(|child| child.stdin.as_mut()) else { return false };
+        stdin.write_all(format!("{line}\n").as_bytes()).and_then(|_| stdin.flush()).is_ok()
+    }
+
+    /// The helper's last fan error, if it's from the last 10 s.
+    pub fn fan_error(&self) -> Option<String> {
+        let latest = self.latest.lock().unwrap();
+        latest.fan_error.as_ref().filter(|(_, at)| at.elapsed() < Duration::from_secs(10)).map(|(e, _)| e.clone())
     }
 
     pub fn error(&self) -> Option<String> {
@@ -164,6 +182,8 @@ fn supervise(
                             slot.error = None;
                         } else if let Some(error) = parsed.error {
                             slot.error = Some(error);
+                        } else if let Some(error) = parsed.fan_error {
+                            slot.fan_error = Some((error, Instant::now()));
                         }
                     }
                 }

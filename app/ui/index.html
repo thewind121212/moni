@@ -113,6 +113,51 @@
       </section>
 
       <div class="side">
+        <section class="card" aria-labelledby="fans-title">
+          <div class="card-head">
+            <h2 id="fans-title">Fan control</h2>
+            <span class="pill" id="pill-fans">Off</span>
+          </div>
+
+          <label class="row toggle">
+            <span>
+              <strong>Control the fans</strong>
+              <small>In place of Gigabyte Control Center: quit it and turn off its start with Windows. Off, or if Moni stops, the BIOS curves run the fans.</small>
+            </span>
+            <input type="checkbox" id="fans-enabled">
+          </label>
+
+          <div class="row stack">
+            <strong>Fan groups</strong>
+            <small>Pick the header each group is plugged into. Identify spins that header to 100 % for 6 s so you can see which fans it drives.</small>
+            <div class="fan-groups" id="fan-groups"></div>
+          </div>
+
+          <details class="row">
+            <summary>Curves</summary>
+            <div class="row stack">
+              <strong>CPU curve <span class="muted">(radiator)</span></strong>
+              <div class="curve" id="curve-cpu"></div>
+            </div>
+            <div class="row stack">
+              <strong>GPU curve <span class="muted">(intakes)</span></strong>
+              <div class="curve" id="curve-gpu"></div>
+            </div>
+            <div class="row stack">
+              <strong>Intakes faster by <span class="muted" id="fans-offset-value"></span></strong>
+              <input type="range" id="fans-offset" min="0" max="30" step="1">
+              <small>Intakes run at the higher of the GPU curve and the radiator's speed, plus this: more air comes in than goes out, so dust only gets in through the filters.</small>
+            </div>
+            <div class="row stack">
+              <strong>Hysteresis <span class="muted" id="fans-hysteresis-value"></span></strong>
+              <input type="range" id="fans-hysteresis" min="0" max="8" step="0.5">
+              <small>Speeds only drop once the temperature has fallen this far, so fans don't hunt.</small>
+            </div>
+            <small>At 90 °C CPU or 85 °C GPU every fan goes to 100 %.</small>
+          </details>
+          <p class="muted" id="fans-note"></p>
+        </section>
+
         <section class="card" aria-labelledby="display-title">
           <div class="card-head">
             <h2 id="display-title">Digital display</h2>

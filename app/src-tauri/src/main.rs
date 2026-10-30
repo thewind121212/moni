@@ -77,6 +77,14 @@ fn restart_clock() -> Result<(), String> {
         .map_err(|e| format!("Could not ask the service ({e}). Reinstall Moni so it can prepare its folder."))
 }
 
+/// Ask the service (it owns the fan headers) to spin one to 100 % for a few
+/// seconds, so the user sees which fans are on it.
+#[tauri::command]
+fn identify_fan(control: String) -> Result<(), String> {
+    paths::write_atomic(&paths::identify_fan_path(), control.trim().as_bytes())
+        .map_err(|e| format!("Could not ask the service ({e}). Reinstall Moni so it can prepare its folder."))
+}
+
 /// Restarting a LocalSystem service needs admin: ask through UAC.
 #[tauri::command]
 fn restart_service(app: AppHandle) -> Result<(), String> {
@@ -167,6 +175,7 @@ fn main() {
             set_autostart,
             restart_service,
             restart_clock,
+            identify_fan,
             open_data_folder,
             firmware::flash_firmware,
             firmware::firmware_info,

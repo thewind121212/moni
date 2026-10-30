@@ -49,6 +49,95 @@ pub struct Config {
     pub lights: Lights,
     /// The digital display (USB HID 5131:2007). See [`crate::display`].
     pub display: Display,
+    /// Fan speeds by curve. See [`crate::fans`].
+    pub fans: Fans,
+}
+
+/// What a fan group follows.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FanRole {
+    /// The CPU curve (an AIO radiator, a CPU cooler).
+    #[default]
+    Cpu,
+    /// Air in: the higher of the GPU curve and the CPU fans' speed, plus the
+    /// intake offset, so more air always comes in than goes out (dust only
+    /// gets in through the filters).
+    Intake,
+    /// Air out: the higher of the CPU and GPU curves.
+    Exhaust,
+    /// An AIO pump: always 100 %.
+    Pump,
+    /// Left to the BIOS.
+    Bios,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct FanGroup {
+    pub name: String,
+    pub role: FanRole,
+    /// The LibreHardwareMonitor control sensor id of its header, e.g.
+    /// "/lpc/it8689e/0/control/0"; empty = not assigned yet.
+    pub control: String,
+    /// Never slower than this, %.
+    pub min: u8,
+}
+
+impl Default for FanGroup {
+    fn default() -> Self {
+        Self { name: String::new(), role: FanRole::Cpu, control: String::new(), min: 30 }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Fans {
+    /// Off until switched on (the BIOS curves run the fans until then).
+    pub enabled: bool,
+    pub groups: Vec<FanGroup>,
+    /// [°C, %] points, linear between them, flat past the ends.
+    pub cpu_curve: Vec<[f64; 2]>,
+    pub gpu_curve: Vec<[f64; 2]>,
+    /// Intakes run this much faster than the fans they follow, %.
+    pub intake_offset: u8,
+    /// Speeds only drop once the temperature has fallen this far, °C.
+    pub hysteresis: f64,
+}
+
+impl Default for Fans {
+    /// The owner's PC (ASUS AP202, B650EM FORCE): a 360 radiator on top
+    /// blowing out, 3 bottom and 2 side fans in, 1 rear fan out, an AIO pump.
+    fn default() -> Self {
+        let group = |name: &str, role: FanRole, min: u8| FanGroup { name: name.into(), role, control: String::new(), min };
+        Self {
+            enabled: false,
+            groups: vec![
+                group("Radiator (top, out)", FanRole::Cpu, 30),
+                group("Bottom (in)", FanRole::Intake, 30),
+                group("Side (in)", FanRole::Intake, 30),
+                group("Rear (out)", FanRole::Exhaust, 30),
+                group("Pump", FanRole::Pump, 100),
+            ],
+            cpu_curve: vec![[40.0, 30.0], [60.0, 40.0], [75.0, 60.0], [85.0, 80.0]],
+            gpu_curve: vec![[45.0, 30.0], [65.0, 50.0], [75.0, 65.0], [82.0, 80.0]],
+            intake_offset: 10,
+            hysteresis: 3.0,
+        }
+    }
+}
+
+/// 2-8 points, by temperature, within 0-110 °C and 0-100 %; else the default.
+fn clean_curve(points: &[[f64; 2]], default: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    let mut out: Vec<[f64; 2]> = points
+        .iter()
+        .filter(|[t, p]| t.is_finite() && p.is_finite())
+        .map(|[t, p]| [t.clamp(0.0, 110.0), p.clamp(0.0, 100.0)])
+        .take(8)
+        .collect();
+    out.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    out.dedup_by(|a, b| a[0] == b[0]);
+    if out.len() < 2 { default.to_vec() } else { out }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -195,6 +284,7 @@ impl Default for Config {
             control_key: String::new(),
             lights: Lights::default(),
             display: Display::default(),
+            fans: Fans::default(),
         }
     }
 }
@@ -241,6 +331,18 @@ impl Config {
         lights.device = lights.device.trim().to_string();
         lights.zones = lights.zones.trim().to_string();
         lights.leds_per_zone = lights.leds_per_zone.min(1024);
+        let fans = &mut self.fans;
+        let defaults = Fans::default();
+        fans.cpu_curve = clean_curve(&fans.cpu_curve, &defaults.cpu_curve);
+        fans.gpu_curve = clean_curve(&fans.gpu_curve, &defaults.gpu_curve);
+        fans.intake_offset = fans.intake_offset.min(50);
+        fans.hysteresis = if fans.hysteresis.is_finite() { fans.hysteresis.clamp(0.0, 10.0) } else { defaults.hysteresis };
+        fans.groups.truncate(8);
+        for group in &mut fans.groups {
+            group.name = group.name.trim().chars().take(40).collect();
+            group.control = group.control.trim().to_string();
+            group.min = if group.role == FanRole::Pump { 100 } else { group.min.clamp(20, 100) };
+        }
         let display = &mut self.display;
         display.mode = display.mode.min(3);
         display.cycle = display.cycle.clamp(1, 60);

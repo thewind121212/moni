@@ -47,6 +47,18 @@ pub fn restart_clock_path() -> PathBuf {
     data_dir().join("restart-clock")
 }
 
+/// The app drops this (holding a fan control id) to spin that header to 100 %
+/// for a few seconds, so the user sees which fans are on it.
+pub fn identify_fan_path() -> PathBuf {
+    data_dir().join("identify-fan")
+}
+
+/// Consume a request file that holds text: its text when under 30 s old.
+pub fn take_request_text(path: &std::path::Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok();
+    take_request(path).then_some(text?).map(|t| t.trim().to_string())
+}
+
 /// Consume a request file: true when it existed and is under 30 s old.
 pub fn take_request(path: &std::path::Path) -> bool {
     let fresh = fs::metadata(path)

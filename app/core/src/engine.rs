@@ -5,6 +5,7 @@ use crate::config::{Config, Transport};
 use crate::control;
 use crate::hardware::{self, Choices, SensorFeed};
 use crate::display::DisplayFeed;
+use crate::fans::FanControl;
 use crate::lights::Lights;
 use crate::paths;
 use crate::sampler::{Payload, Sampler};
@@ -43,8 +44,20 @@ pub struct Status {
     /// The digital display: showing now, and what it's doing or why not.
     pub display_on: bool,
     pub display_note: String,
+    /// Fan control: what it's doing or why not, and each group's speed now.
+    pub fans_note: String,
+    pub fans: Vec<FanStatus>,
     pub ports: Vec<PortInfo>,
     pub sample: Option<Payload>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct FanStatus {
+    pub name: String,
+    pub control: String,
+    /// The speed Moni sets now, %; None while the BIOS runs it.
+    pub speed: Option<f64>,
 }
 
 pub struct Options {
@@ -77,6 +90,11 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
     let control_note = (!options.preview).then(|| control::start(control_key.clone()));
     let lights = (!options.preview).then(|| Lights::start(config.lights.clone()));
     let display = (!options.preview).then(|| DisplayFeed::start(config.display.clone()));
+    let mut fans = FanControl::default();
+    let mut fans_at = Instant::now();
+    let mut fan_rival: Option<&'static str> = None;
+    let mut fan_rival_at: Option<Instant> = None;
+    let mut processes = sysinfo::System::new();
     paths::log(&format!("moni-service {VERSION} started ({:?})", config.transport));
     if let Some(note) = &control_note {
         paths::log(&format!("remote shutdown: {}", note.lock().unwrap()));
@@ -115,6 +133,32 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
         }
         if let Some(display) = &display {
             display.sample(&payload);
+        }
+        if let (false, Some(feed)) = (options.preview, sampler.sensors.as_ref()) {
+            if let Some(control) = paths::take_request_text(&paths::identify_fan_path()) {
+                paths::log(&format!("fans: identify {control}"));
+                fans.identify(&control);
+            }
+            if config.fans.enabled && fan_rival_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(10)) {
+                fan_rival_at = Some(Instant::now());
+                use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+                processes.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet));
+                fan_rival = processes.processes().values().find_map(|p| {
+                    let exe = p.exe().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+                    crate::fans::rival(&p.name().to_string_lossy(), &exe)
+                });
+            }
+            let dt = fans_at.elapsed().as_secs_f64();
+            fans_at = Instant::now();
+            let before = fans.note.clone();
+            for command in fans.step(&config.fans, payload.ct, payload.gt, dt, fan_rival) {
+                if !feed.command(&command.line()) {
+                    fans.note = "waiting for the sensor helper".into();
+                }
+            }
+            if fans.note != before && !fans.note.starts_with("on:") {
+                paths::log(&format!("fans: {}", fans.note));
+            }
         }
         let line = serde_json::to_string(&payload).unwrap_or_default();
         let control_on = control_note.is_some() && control::key_ok(&config.control_key);
@@ -156,6 +200,18 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
             let sensor_error = sampler.sensors.as_ref().and_then(|feed| feed.error());
             let (lights_on, lights_note) = lights.as_ref().map(|l| l.status()).unwrap_or_default();
             let (display_on, display_note) = display.as_ref().map(|d| d.status()).unwrap_or_default();
+            let fan_error = sampler.sensors.as_ref().and_then(|feed| feed.fan_error());
+            let fans_note = match (&fan_error, sampler.sensors.is_some()) {
+                (_, false) => "needs the sensor helper (LibreHardwareMonitor)".to_string(),
+                (Some(error), _) => format!("{} · {error}", fans.note),
+                (None, _) => fans.note.clone(),
+            };
+            let fan_groups = config
+                .fans
+                .groups
+                .iter()
+                .map(|g| crate::engine::FanStatus { name: g.name.clone(), control: g.control.clone(), speed: fans.speed(&g.control) })
+                .collect();
             let status = Status {
                 updated: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
                 version: VERSION.into(),
@@ -177,6 +233,8 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
                 lights_note,
                 display_on,
                 display_note,
+                fans_note,
+                fans: fan_groups,
                 ports: ports.clone(),
                 sample: Some(payload),
             };
@@ -207,6 +265,12 @@ pub fn run(stop: Arc<AtomicBool>, options: Options) {
     // stuck in a USB-serial or sensor-driver call can hold up a shutdown.
     let stopping = Instant::now();
     serial.close("service stopping");
+    // Fans back to the BIOS (the helper does it too when its stdin closes).
+    if let Some(feed) = &sampler.sensors {
+        for command in fans.release() {
+            feed.command(&command.line());
+        }
+    }
     if let Some(display) = &display {
         display.stop();
     }

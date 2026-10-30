@@ -227,3 +227,15 @@ details.row > .row:first-of-type { border-top: 0; }
 /* the fixed comets' Color: a slider over the combo's colors */
 input[type="range"].level-slider { height: 10px; border-radius: 999px; appearance: none; -webkit-appearance: none; }
 input[type="range"].level-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 2px solid var(--border); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35); }
+
+/* Fan control */
+.fan-groups { display: grid; gap: 8px; }
+.fan-group { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 8px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
+.fan-group .fan-name { font-weight: 600; min-width: 0; }
+.fan-group .fan-speed { font-variant-numeric: tabular-nums; color: var(--muted); }
+.fan-group .fan-line { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.fan-group select { flex: 1 1 180px; min-width: 0; }
+.fan-group .fan-min { width: 4.5em; }
+.curve { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 6px; }
+.curve label { display: flex; gap: 4px; align-items: center; font-size: 12px; color: var(--muted); }
+.curve input { width: 3.6em; }

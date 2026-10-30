@@ -3,7 +3,14 @@
 // CPU temperature/power/fan/clock and motherboard/SSD temperatures from them.
 // When its parent closes stdin it closes LibreHardwareMonitor (releasing the
 // PawnIO driver and drive handles) and exits, or is forced out after 1.5 s.
+//
+// Fan control: stdin also takes one command per line from moni-service,
+//   set <control sensor id> <percent>    e.g. set /lpc/it8689e/0/control/0 45
+//   default <control sensor id>          hand that header back to the BIOS
+// Every header it has set goes back to the BIOS (SetDefault) when stdin
+// closes, so if moni-service stops or dies, the BIOS fan curves take over.
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -25,14 +32,22 @@ namespace Moni.Sensors
             }
             interval = Math.Max(250, interval);
 
-            var stdout = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
+            // (synchronized: the reading loop and fan commands both write lines)
+            var stdout = TextWriter.Synchronized(new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true });
             var stop = new ManualResetEvent(false);
             if (!once)
             {
-                // Parent gone (or service stopping) -> stdin hits EOF -> close and exit.
+                // Commands, until the parent is gone (or the service stops): stdin
+                // hits EOF -> fans back to the BIOS, close and exit.
                 var watcher = new Thread(() =>
                 {
-                    try { while (Console.In.Read() != -1) { } } catch { }
+                    try
+                    {
+                        string command;
+                        while ((command = Console.In.ReadLine()) != null) Command(command, stdout);
+                    }
+                    catch { }
+                    ReleaseFans();
                     stop.Set();
                     Thread.Sleep(1500); // the main loop normally returns well before this
                     Environment.Exit(0);
@@ -78,8 +93,11 @@ namespace Moni.Sensors
                 bool first = true;
                 try
                 {
-                    foreach (IHardware hardware in computer.Hardware)
-                        Visit(hardware, line, ref first);
+                    lock (Gate)
+                    {
+                        foreach (IHardware hardware in computer.Hardware)
+                            Visit(hardware, line, ref first);
+                    }
                 }
                 catch (Exception error)
                 {
@@ -91,8 +109,64 @@ namespace Moni.Sensors
                 stdout.WriteLine(line.ToString());
                 if (once || stop.WaitOne(interval)) break;
             }
-            try { computer?.Close(); } catch { }
+            ReleaseFans();
+            lock (Gate)
+            {
+                Controls.Clear();
+                try { computer?.Close(); } catch { }
+            }
             return 0;
+        }
+
+        // LibreHardwareMonitor isn't thread-safe: reading and fan commands take turns.
+        private static readonly object Gate = new object();
+        // Fan control sensors by identifier, as last seen.
+        private static readonly Dictionary<string, ISensor> Controls = new Dictionary<string, ISensor>();
+        // Headers this helper has set (they go back to the BIOS on exit).
+        private static readonly HashSet<string> Taken = new HashSet<string>();
+
+        private static void Command(string text, TextWriter stdout)
+        {
+            var parts = (text ?? "").Trim().Split(' ');
+            if (parts.Length < 2) return;
+            lock (Gate)
+            {
+                if (!Controls.TryGetValue(parts[1], out ISensor sensor) || sensor.Control == null)
+                {
+                    stdout.WriteLine("{\"fan_error\":" + Quote("no fan control " + parts[1]) + "}");
+                    return;
+                }
+                try
+                {
+                    if (parts[0] == "set" && parts.Length >= 3
+                        && float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float percent))
+                    {
+                        sensor.Control.SetSoftware(Math.Max(0f, Math.Min(100f, percent)));
+                        Taken.Add(parts[1]);
+                    }
+                    else if (parts[0] == "default")
+                    {
+                        sensor.Control.SetDefault();
+                        Taken.Remove(parts[1]);
+                    }
+                }
+                catch (Exception error)
+                {
+                    stdout.WriteLine("{\"fan_error\":" + Quote(parts[1] + ": " + error.Message) + "}");
+                }
+            }
+        }
+
+        private static void ReleaseFans()
+        {
+            lock (Gate)
+            {
+                foreach (string id in Taken)
+                {
+                    try { if (Controls.TryGetValue(id, out ISensor sensor)) sensor.Control?.SetDefault(); } catch { }
+                }
+                Taken.Clear();
+            }
         }
 
         private static void Visit(IHardware hardware, StringBuilder line, ref bool first)
@@ -102,6 +176,8 @@ namespace Moni.Sensors
                 Visit(sub, line, ref first);
             foreach (ISensor sensor in hardware.Sensors)
             {
+                if (sensor.SensorType == SensorType.Control && sensor.Control != null)
+                    Controls[sensor.Identifier.ToString()] = sensor;
                 float value = sensor.Value ?? 0f;
                 if (float.IsNaN(value) || float.IsInfinity(value)) value = 0f;
                 if (!first) line.Append(',');
